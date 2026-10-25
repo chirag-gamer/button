@@ -1,0 +1,27 @@
+[package]
+name = "button"
+version = "0.1.0"
+description = "A free, open-source Windows tray app that gets your screen recording-ready in one click and safely puts everything back"
+authors = ["chirag-gamer"]
+edition = "2024"
+
+# The `_lib` suffix makes the lib name unique and wouldn't conflict with the bin name.
+# This is only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+[lib]
+name = "button_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.5", features = [] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
