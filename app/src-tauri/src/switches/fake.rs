@@ -91,7 +91,10 @@ impl FakeSwitch {
         let on = load_state(&state_file, id).is_some_and(|v| v == json!(true));
         Self {
             id,
-            options: FakeOptions::default(),
+            options: FakeOptions {
+                persistent: true,
+                ..FakeOptions::default()
+            },
             state_file: Some(state_file),
             inner: Arc::new(Mutex::new(Inner { on, calls: 0 })),
         }

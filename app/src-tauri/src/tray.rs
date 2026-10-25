@@ -1,0 +1,189 @@
+//! Tray icon, menu and the 1 s ticker (spec 2.1, 7.7; FR-1, FR-13).
+
+use std::time::Duration;
+
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, Wry};
+
+use crate::automation::{self, Action};
+use crate::{SessionStatus, SharedState};
+
+/// Managed handles the dispatcher needs to refresh the tray.
+pub struct TrayHandles {
+    pub icon: TrayIcon,
+    pub start_restore_item: MenuItem<Wry>,
+}
+
+pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
+    let start_restore_item = MenuItem::with_id(
+        app,
+        "start-restore",
+        "Start Recording Mode",
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, "settings", "Settings", false, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&start_restore_item, &settings, &quit])?;
+
+    let icon = TrayIconBuilder::with_id("main")
+        // The menu must not also open on a left click (spec 2.5 instruction).
+        .show_menu_on_left_click(false)
+        .menu(&menu)
+        .icon(idle_icon())
+        .tooltip("button")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "start-restore" => automation::run(app, Action::Toggle),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            // Act only on the release of a click; the enum is non_exhaustive
+            // (spec 2.5 instruction).
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => automation::run(tray.app_handle(), Action::ShowDropdown),
+            TrayIconEvent::Click {
+                button: MouseButton::Middle,
+                button_state: MouseButtonState::Up,
+                ..
+            } => automation::run(tray.app_handle(), Action::Toggle),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(TrayHandles {
+        icon,
+        start_restore_item,
+    })
+}
+
+pub fn idle_icon() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/tray-idle.png")
+}
+
+pub fn active_icon() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/tray-active.png")
+}
+
+/// One refresh function after every state change (spec 2.5 instruction):
+/// icon, tooltip ("button" idle, elapsed time active) and menu text.
+pub fn update_tray(app: &AppHandle) {
+    let Some(handles) = app.try_state::<TrayHandles>() else {
+        return;
+    };
+    let state = app.state::<SharedState>();
+    let b = state.lock().unwrap_or_else(|p| p.into_inner());
+    let active = b.engine.state().status == SessionStatus::Active;
+    let tooltip = if active {
+        let started = b
+            .engine
+            .state()
+            .started_at
+            .expect("an active session has startedAt");
+        let seconds = (time::OffsetDateTime::now_utc() - started).whole_seconds();
+        format!("button - {}", format_elapsed(seconds))
+    } else {
+        "button".to_string()
+    };
+    drop(b);
+    let _ = handles.icon.set_tooltip(Some(tooltip.as_str()));
+    let _ = handles
+        .icon
+        .set_icon(Some(if active { active_icon() } else { idle_icon() }));
+    let _ = handles.start_restore_item.set_text(if active {
+        "Restore"
+    } else {
+        "Start Recording Mode"
+    });
+}
+
+/// Tooltip time: m:ss under an hour, h:mm:ss from an hour on (FR-13).
+pub fn format_elapsed(total_seconds: i64) -> String {
+    let s = total_seconds.max(0);
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m}:{sec:02}")
+    }
+}
+
+/// The 1 s ticker: a plain std::thread with a 1 s sleep (no tokio dep). It
+/// only works while a session is active (spec 7.7, 10); timers fire here
+/// from Phase 4 on.
+pub fn start_ticker(app: AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let state = app.state::<SharedState>();
+            let b = state.lock().unwrap_or_else(|p| p.into_inner());
+            let active = b.engine.state().status == SessionStatus::Active;
+            drop(b);
+            if active {
+                automation::after_change(&app);
+            }
+        }
+    });
+}
+
+/// Toggle the dropdown window. The window exists from task 2.6 on; until
+/// then this is a no-op with a log line.
+pub fn toggle_dropdown(app: &AppHandle) {
+    match app.get_webview_window("dropdown") {
+        Some(window) => {
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.hide();
+            } else {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+        None => log::warn!("dropdown window not built yet (task 2.6)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_elapsed;
+    use crate::switches::{SwitchId, build_registry};
+
+    #[test]
+    fn elapsed_format_matches_the_ui_helper() {
+        assert_eq!(format_elapsed(0), "0:00");
+        assert_eq!(format_elapsed(59), "0:59");
+        assert_eq!(format_elapsed(60), "1:00");
+        assert_eq!(format_elapsed(3599), "59:59");
+        assert_eq!(format_elapsed(3600), "1:00:00");
+        assert_eq!(format_elapsed(3661), "1:01:01");
+        assert_eq!(format_elapsed(-3), "0:00");
+    }
+
+    #[test]
+    fn debug_registry_has_two_persistent_fakes_and_keep_awake() {
+        let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = build_registry(&dir);
+        let ids: Vec<SwitchId> = registry.iter().map(|s| s.id()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                SwitchId::DesktopIcons,
+                SwitchId::Taskbar,
+                SwitchId::KeepAwake
+            ]
+        );
+        // D-063: desktop icons and taskbar persist across restarts via their
+        // fake state file; keep-awake is memory-only.
+        let persistent: Vec<SwitchId> = registry
+            .iter()
+            .filter(|s| s.persistent())
+            .map(|s| s.id())
+            .collect();
+        assert_eq!(persistent, vec![SwitchId::DesktopIcons, SwitchId::Taskbar]);
+    }
+}

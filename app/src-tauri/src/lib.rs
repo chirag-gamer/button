@@ -1,8 +1,10 @@
+mod automation;
 pub mod journal;
 pub mod os;
 pub mod session;
 pub mod settings;
 pub mod switches;
+mod tray;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -103,6 +105,30 @@ pub struct AppState {
     pub update: Option<UpdateState>,
 }
 
+/// Everything mutable the app shares, behind one `Mutex` (commands.rs owns
+/// the wrapper; tray, hotkeys and the dispatcher read through it).
+pub struct ButtonState {
+    pub engine: session::SessionEngine,
+    pub settings: settings::Settings,
+    /// The on-disk settings schemaVersion is newer than this build knows:
+    /// never save over it (spec 7.12).
+    pub settings_read_only: bool,
+    pub hotkey: HotkeyState,
+    pub os: OsInfo,
+}
+
+pub type SharedState = std::sync::Mutex<ButtonState>;
+
+pub fn build_app_state(b: &ButtonState) -> AppState {
+    AppState {
+        session: b.engine.state().clone(),
+        switches: b.engine.switch_states(),
+        hotkey: b.hotkey.clone(),
+        os: b.os,
+        update: None,
+    }
+}
+
 /// Atomic write protocol (spec 7.4): write `<name>.tmp` in the same dir,
 /// sync, then rename over the target. std::fs::rename replaces an existing
 /// target on Windows (MoveFileExW; see spec 7.4 citation).
@@ -123,6 +149,67 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            use tauri::Manager;
+            let os = os::detect();
+            let data_dir = app.path().app_local_data_dir().expect("app data dir");
+            std::fs::create_dir_all(&data_dir).ok();
+            let now = time::OffsetDateTime::now_utc();
+
+            let settings_read = settings::load(&data_dir, now).expect("settings load");
+            let settings_read_only = matches!(settings_read, settings::SettingsRead::Newer(_));
+            let settings = match settings_read {
+                settings::SettingsRead::Fresh(s)
+                | settings::SettingsRead::Loaded(s)
+                | settings::SettingsRead::Invalid(s)
+                | settings::SettingsRead::Newer(s) => s,
+            };
+
+            let mut engine = session::SessionEngine::new(
+                switches::build_registry(&data_dir),
+                os,
+                data_dir,
+                env!("CARGO_PKG_VERSION").to_string(),
+            );
+            // Crash recovery runs before the tray is ready (spec 7.3). The
+            // FR-6 notification about it is sent by task 2.9.
+            let recovery = engine.recover(now).expect("recovery");
+
+            app.manage(std::sync::Mutex::new(crate::ButtonState {
+                engine,
+                settings,
+                settings_read_only,
+                hotkey: crate::HotkeyState {
+                    binding: "Alt+R".into(),
+                    registered: false,
+                },
+                os,
+            }));
+            app.manage(automation::RecoveryNotice(recovery));
+
+            let tray_handles = tray::build(app.handle())?;
+            app.manage(tray_handles);
+            tray::update_tray(app.handle());
+            tray::start_ticker(app.handle().clone());
+
+            // A CLI invocation runs its action and exits; `button.exe` with
+            // no arguments behaves like the tray icon's left click later
+            // (task 2.6). Task 2.8 adds forwarding to the running instance.
+            // Exit code is always 0 (spec 6.3, KNOW verified in 2.8).
+            let cli_args: Vec<String> = std::env::args().skip(1).collect();
+            match automation::parse(&cli_args) {
+                Ok(action) if action != automation::Action::ShowDropdown => {
+                    automation::run(app.handle(), action);
+                    app.handle().exit(0);
+                }
+                Err(error) => {
+                    log::warn!("{error}");
+                    app.handle().exit(0);
+                }
+                _ => {}
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

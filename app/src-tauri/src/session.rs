@@ -65,6 +65,42 @@ impl SessionEngine {
         &self.session
     }
 
+    /// Availability of one registered switch, if present.
+    pub fn switch_availability(&self, id: SwitchId) -> Option<Availability> {
+        self.switches
+            .iter()
+            .find(|s| s.id() == id)
+            .map(|s| s.availability(&self.os))
+    }
+
+    /// Per-switch rows for the UI (spec 5.4). Off-timers come from the
+    /// journal's timer entries; timers fire via the ticker (spec 7.7).
+    pub fn switch_states(&self) -> Vec<crate::SwitchState> {
+        self.switches
+            .iter()
+            .map(|s| {
+                let off_at = self
+                    .journal
+                    .as_ref()
+                    .and_then(|j| {
+                        j.entries
+                            .iter()
+                            .rev()
+                            .find(|e| e.owner == JournalOwner::Timer && e.switch == s.id())
+                    })
+                    .and_then(|e| e.off_at);
+                crate::SwitchState {
+                    id: s.id(),
+                    on: s.read().is_ok_and(|v| v.as_bool().unwrap_or(false)),
+                    availability: s.availability(&self.os),
+                    experimental: s.experimental(),
+                    off_at,
+                    detail: None,
+                }
+            })
+            .collect()
+    }
+
     /// Recording Mode apply (spec 7.1). The countdown is the app layer's job.
     /// One failing apply never stops the others (FR-7).
     pub fn start(&mut self, now: OffsetDateTime) -> Result<&SessionState, SessionError> {
@@ -389,6 +425,46 @@ mod tests {
             rig.engine.start(now()),
             Err(SessionError::AlreadyActive)
         ));
+    }
+
+    #[test]
+    fn switch_states_reflect_the_registry_and_journal_timers() {
+        let dir = test_dir("switch-states");
+        let mut rig = build(&dir, |_| opts(None, Availability::Available));
+        let states = rig.engine.switch_states();
+        assert!(states.iter().all(|s| !s.on && s.off_at.is_none()));
+
+        // Starting Recording Mode turns every available fake on (FR-4).
+        rig.engine.start(now()).unwrap();
+        let states = rig.engine.switch_states();
+        assert!(states.iter().all(|s| s.on));
+
+        // A timer entry in the journal surfaces as off_at for that switch:
+        // seed one on disk for a persistent switch and recover. (A timer for
+        // a non-persistent switch is dropped at recovery: that switch died
+        // with the old process, spec 7.3.)
+        let mut journal = journal::Journal::new("0.1.0", now());
+        journal.entries.push(JournalEntry {
+            seq: journal.next_seq(),
+            owner: JournalOwner::Timer,
+            switch: SwitchId::Taskbar,
+            before: serde_json::json!(false),
+            after: serde_json::json!(true),
+            persistent: true,
+            off_at: Some(later()),
+            at: now(),
+        });
+        journal::write(&journal, &dir).unwrap();
+        let mut rig2 = build(&dir, |_| opts(None, Availability::Available));
+        rig2.engine.recover(now()).unwrap();
+        let states = rig2.engine.switch_states();
+        let taskbar = states.iter().find(|s| s.id == SwitchId::Taskbar).unwrap();
+        assert_eq!(taskbar.off_at, Some(later()));
+        let desktop = states
+            .iter()
+            .find(|s| s.id == SwitchId::DesktopIcons)
+            .unwrap();
+        assert_eq!(desktop.off_at, None);
     }
 
     #[test]

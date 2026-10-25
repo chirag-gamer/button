@@ -28,6 +28,34 @@ pub enum SwitchId {
     Bluetooth,
 }
 
+/// The registered switches (spec 2.1). Release builds register none until
+/// Phase 3; debug builds register fakes (D-063) so the whole flow is
+/// demoable without touching Windows (D-033).
+pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
+    #[cfg(any(test, debug_assertions))]
+    {
+        vec![
+            Box::new(fake::FakeSwitch::persistent(
+                SwitchId::DesktopIcons,
+                data_dir.to_path_buf(),
+            )),
+            Box::new(fake::FakeSwitch::persistent(
+                SwitchId::Taskbar,
+                data_dir.to_path_buf(),
+            )),
+            Box::new(fake::FakeSwitch::new(
+                SwitchId::KeepAwake,
+                fake::FakeOptions::default(),
+            )),
+        ]
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        let _ = data_dir;
+        Vec::new()
+    }
+}
+
 /// Recording Mode's fixed apply order (spec 7.1).
 pub const RECORDING_ORDER: [SwitchId; 10] = [
     SwitchId::Dnd,
