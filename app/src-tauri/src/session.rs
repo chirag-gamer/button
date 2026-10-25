@@ -502,6 +502,36 @@ mod tests {
     }
 
     #[test]
+    fn recovery_restores_a_due_timer_and_removes_its_entry() {
+        // A deadline that passed while the app was down: the switch must be
+        // restored (off_at <= now is due, spec 7.7) and the entry removed,
+        // not re-armed.
+        let dir = test_dir("due-timer");
+        let mut journal = journal::Journal::new("0.1.0", now());
+        journal.entries.push(JournalEntry {
+            seq: journal.next_seq(),
+            owner: JournalOwner::Timer,
+            switch: SwitchId::Taskbar,
+            before: serde_json::json!(false),
+            after: serde_json::json!(true),
+            persistent: true,
+            off_at: Some(now()),
+            at: now(),
+        });
+        journal::write(&journal, &dir).unwrap();
+
+        let mut rig = build(&dir, |_| opts(None, Availability::Available));
+        // The OS still has taskbar changed (the entry we expect restored);
+        // registry order is desktop-icons, taskbar, keep-awake.
+        rig.handles[1].set(true);
+        let report = rig.engine.recover(now()).unwrap();
+        assert_eq!(report.restored, vec![SwitchId::Taskbar]);
+        assert!(report.timers_to_rearm.is_empty());
+        assert!(all_off(&rig));
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
     fn stop_restores_and_a_second_stop_is_rejected() {
         let dir = test_dir("stop");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
