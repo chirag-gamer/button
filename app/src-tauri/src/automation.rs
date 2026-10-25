@@ -111,16 +111,26 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
     let now = OffsetDateTime::now_utc();
 
     let active = b.engine.state().status == SessionStatus::Active;
-    match action {
-        Action::Start if !active => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string())?,
-        Action::Start => return Err(session_active()),
-        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string())?,
-        Action::Stop => return Err(no_session()),
-        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string())?,
-        Action::Toggle => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string())?,
+    let selected = b.settings.recording_mode.actions.clone();
+    let mut started = false;
+    let result: Result<(), String> = match action {
+        Action::Start if !active => b
+            .engine
+            .start(now, &selected)
+            .map(|_| started = true)
+            .map_err(|e| e.to_string()),
+        Action::Start => Err(session_active()),
+        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
+        Action::Stop => Err(no_session()),
+        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
+        Action::Toggle => b
+            .engine
+            .start(now, &selected)
+            .map(|_| started = true)
+            .map_err(|e| e.to_string()),
         Action::ShowDropdown { click } => {
             drop(b);
-            tray::toggle_dropdown(app, click);
+            tray::show_dropdown(app, click)?;
             return Ok(());
         }
         Action::Switch { id, on } => {
@@ -139,30 +149,53 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
             return Ok(());
         }
         Action::Restore => {
-            let result = match b.engine.recover(now) {
-                Ok(_) => "Journal restored (if anything was left)".to_string(),
-                Err(e) => format!("Restore failed: {e}"),
+            // While a session is active the journal belongs to it: stop
+            // instead of running crash recovery, which would drop its
+            // non-persistent entries (spec 7.3 vs 7.2).
+            let summary = if active {
+                match b.engine.stop(now) {
+                    Ok(_) => "Recording Mode ended".to_string(),
+                    Err(e) => format!("Restore failed: {e}"),
+                }
+            } else {
+                match b.engine.recover(now) {
+                    Ok(report) if report.failed.is_empty() => {
+                        "Journal restored (if anything was left)".to_string()
+                    }
+                    Ok(report) => format!(
+                        "Restore finished, but {} switch(es) could not be restored",
+                        report.failed.len()
+                    ),
+                    Err(e) => format!("Restore failed: {e}"),
+                }
             };
-            notify(app, &result);
+            notify(app, &summary);
             drop(b);
             after_change(app);
             return Ok(());
         }
-    }
+    };
     drop(b);
+    // Sync tray + UI on success and on error alike: the engine may have
+    // changed state even when the overall action failed.
     after_change(app);
+    result?;
     // A started session closes the dropdown (spec 7.1.4).
-    if !active {
+    if started {
         tray::hide_dropdown(app);
     }
-    // Summary when a restore left failures behind (spec 7.2).
+    // Summary when the last run left failures behind (apply or restore,
+    // spec 7.1.4 / 7.2).
     let state = app.state::<SharedState>();
     let b = state.lock().unwrap_or_else(|p| p.into_inner());
     let failed = b.engine.state().failed.len();
     let idle = b.engine.state().status == SessionStatus::Idle;
     drop(b);
     if idle && failed > 0 {
-        notify(app, &format!("{failed} switch(es) failed to restore"));
+        notify(
+            app,
+            &format!("{failed} switch(es) failed during the last run"),
+        );
     }
     Ok(())
 }

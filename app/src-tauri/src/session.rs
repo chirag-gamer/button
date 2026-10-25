@@ -102,8 +102,14 @@ impl SessionEngine {
     }
 
     /// Recording Mode apply (spec 7.1). The countdown is the app layer's job.
-    /// One failing apply never stops the others (FR-7).
-    pub fn start(&mut self, now: OffsetDateTime) -> Result<&SessionState, SessionError> {
+    /// One failing apply never stops the others (FR-7). Only the actions the
+    /// user selected (settings.recordingMode.actions) are applied, in the
+    /// fixed order (spec 7.1).
+    pub fn start(
+        &mut self,
+        now: OffsetDateTime,
+        selected: &[SwitchId],
+    ) -> Result<&SessionState, SessionError> {
         if self.session.status != SessionStatus::Idle {
             return Err(SessionError::AlreadyActive);
         }
@@ -121,13 +127,20 @@ impl SessionEngine {
         let ctx = Ctx::default();
 
         for id in RECORDING_ORDER {
+            if !selected.contains(&id) {
+                continue; // not selected by the user (spec 7.1)
+            }
             let Some(switch) = self
                 .switches
                 .iter()
                 .find(|s| s.id() == id)
                 .map(|s| s.as_ref())
             else {
-                continue; // not registered (release builds until Phase 3)
+                self.session.skipped.push(SkippedSwitch {
+                    id,
+                    reason: "not built".into(),
+                });
+                continue;
             };
             let availability = switch.availability(&self.os);
             if availability != Availability::Available {
@@ -163,11 +176,32 @@ impl SessionEngine {
             };
             journal.entries.push(entry);
             // Journal on disk BEFORE the change (spec 7.1.3).
-            journal::write(journal, &self.data_dir)?;
+            if let Err(e) = journal::write(journal, &self.data_dir) {
+                journal.entries.pop();
+                let _ = journal::write(journal, &self.data_dir);
+                // Undo everything this start applied so no change is left
+                // behind without a journal entry, then report. The engine
+                // stays reusable (idle, empty journal).
+                self.restore_all(now)?;
+                self.session = SessionState {
+                    status: SessionStatus::Idle,
+                    started_at: None,
+                    ends_at: None,
+                    applied: Vec::new(),
+                    skipped: Vec::new(),
+                    failed: Vec::new(),
+                };
+                self.journal = None;
+                let _ = journal::delete(&self.data_dir);
+                return Err(SessionError::Io(e));
+            }
             if let Err(e) = switch.apply(&after) {
                 // Remove the entry again, then keep going (spec 7.1.4, FR-7).
+                // Best effort: if the pop-write fails, the on-disk entry
+                // describes a change that never happened and restore treats
+                // it as user-reverted, so nothing is lost.
                 journal.entries.pop();
-                journal::write(journal, &self.data_dir)?;
+                let _ = journal::write(journal, &self.data_dir);
                 self.session.failed.push(SkippedSwitch {
                     id,
                     reason: e.to_string(),
@@ -234,21 +268,21 @@ impl SessionEngine {
     }
 
     /// Restore entries oldest-to-newest reversed (last seq first). Only
-    /// entries without a pending deadline are touched; timers stay. After
-    /// each entry the journal is written again, so a crash during restore
-    /// resumes correctly (spec 7.2). A panic mid-restore leaves the entry
-    /// on disk for the next recovery.
-    fn restore_all(&mut self, _now: OffsetDateTime) -> Result<(), SessionError> {
+    /// entries without a pending deadline are touched; future timers stay
+    /// (spec 7.7). After each entry the journal is written again, so a
+    /// crash during restore resumes correctly (spec 7.2). A panic
+    /// mid-restore leaves the entry on disk for the next recovery.
+    fn restore_all(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
         if self.journal.is_none() {
             self.session.status = SessionStatus::Idle;
             return Ok(());
         }
         self.session.status = SessionStatus::Restoring;
-        while let Some(idx) = self
-            .journal
-            .as_ref()
-            .and_then(|j| j.entries.iter().rposition(|e| e.off_at.is_none()))
-        {
+        while let Some(idx) = self.journal.as_ref().and_then(|j| {
+            j.entries
+                .iter()
+                .rposition(|e| e.off_at.is_none_or(|t| t <= now))
+        }) {
             let entry = self.journal.as_ref().unwrap().entries[idx].clone();
             self.restore_one(&entry);
             let journal = self.journal.as_mut().unwrap();
@@ -402,7 +436,7 @@ mod tests {
     fn start_applies_in_fixed_order_and_journals() {
         let dir = test_dir("start");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         assert_eq!(rig.engine.state().status, SessionStatus::Active);
         assert_eq!(
             rig.engine.state().applied,
@@ -420,9 +454,9 @@ mod tests {
     fn start_twice_errors_already_active() {
         let dir = test_dir("twice");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         assert!(matches!(
-            rig.engine.start(now()),
+            rig.engine.start(now(), &IDS),
             Err(SessionError::AlreadyActive)
         ));
     }
@@ -435,7 +469,7 @@ mod tests {
         assert!(states.iter().all(|s| !s.on && s.off_at.is_none()));
 
         // Starting Recording Mode turns every available fake on (FR-4).
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         let states = rig.engine.switch_states();
         assert!(states.iter().all(|s| s.on));
 
@@ -471,7 +505,7 @@ mod tests {
     fn stop_restores_and_a_second_stop_is_rejected() {
         let dir = test_dir("stop");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         rig.engine.stop(later()).unwrap();
         assert_eq!(rig.engine.state().status, SessionStatus::Idle);
         assert!(all_off(&rig));
@@ -490,7 +524,7 @@ mod tests {
             o.fail_apply = i == 0;
             o
         });
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         assert_eq!(rig.engine.state().applied.len(), 2);
         assert_eq!(rig.engine.state().failed.len(), 1);
         assert_eq!(rig.engine.state().failed[0].id, SwitchId::DesktopIcons);
@@ -514,7 +548,7 @@ mod tests {
             o
         });
         rig.handles[0].set(true); // already on: nothing to undo
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         assert_eq!(rig.engine.state().applied, vec![SwitchId::KeepAwake]);
         assert_eq!(rig.engine.state().skipped.len(), 1);
         assert_eq!(rig.engine.state().skipped[0].reason, "needs-windows-11");
@@ -528,7 +562,7 @@ mod tests {
     fn user_reverted_values_are_left_alone() {
         let dir = test_dir("user-revert");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         rig.handles[1].set(false); // the user undid taskbar behind our back
         rig.engine.stop(later()).unwrap();
         assert!(!rig.handles[1].is_on());
@@ -543,7 +577,7 @@ mod tests {
     fn recovery_drops_non_persistent_and_restores_persistent() {
         let dir = test_dir("recovery");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now()).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
         drop(rig); // "crash": no restore ran
 
         let mut rig2 = build(&dir, |_| opts(None, Availability::Available));
@@ -611,7 +645,7 @@ mod tests {
                     // n beyond the fake's call count means no panic; every
                     // branch must end in the same clean state.
                     let _ = catch_unwind(AssertUnwindSafe(|| {
-                        rig.engine.start(now()).unwrap();
+                        rig.engine.start(now(), &IDS).unwrap();
                     }));
                     drop(rig);
 
@@ -638,7 +672,7 @@ mod tests {
                 for n in 1..=4 {
                     let dir = test_dir(&format!("kill-restore-{after_mutation}-{fake_idx}-{n}"));
                     let mut rig = build(&dir, |_| opts(None, Availability::Available));
-                    rig.engine.start(now()).unwrap();
+                    rig.engine.start(now(), &IDS).unwrap();
                     drop(rig);
 
                     // Recovery itself runs the restore; kill it mid-way.

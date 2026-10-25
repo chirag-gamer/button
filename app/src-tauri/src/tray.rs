@@ -43,20 +43,20 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
-            // Act only on the release of a click; the enum is non_exhaustive
-            // (spec 2.5 instruction).
+            // The dropdown's visibility is sampled on the press and acted on
+            // on the release; the enum is non_exhaustive (spec 2.5).
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+                ..
+            } => left_click_pressed(tray.app_handle()),
             TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 rect,
                 ..
             } => {
-                if let Err(message) = automation::run(
-                    tray.app_handle(),
-                    Action::ShowDropdown {
-                        click: Some(click_rect(&rect)),
-                    },
-                ) {
+                if let Err(message) = left_click_released(tray.app_handle(), click_rect(&rect)) {
                     automation::notify(tray.app_handle(), &message);
                 }
             }
@@ -165,29 +165,51 @@ fn click_rect(rect: &tauri::Rect) -> crate::position::ClickRect {
     }
 }
 
-/// Toggle the dropdown window, placing it next to the tray icon when the
-/// click position is known (spec 7.13).
-///
-/// Blur-close + the 250 ms guard: when the dropdown is open, clicking the
-/// tray icon first blurs it (auto-hide), then the toggle would show it
-/// again. The guard treats a recent auto-hide as "the user just closed it",
-/// so the tray click closes instead of re-opening.
-pub fn toggle_dropdown(app: &AppHandle, click: Option<crate::position::ClickRect>) {
+/// Whether the dropdown was open when the current left press began; managed
+/// via Tauri so the tray closures can share it.
+type WasOpenAtDown = std::sync::Arc<std::sync::Mutex<bool>>;
+
+/// Called on the left press: the blur that follows the press hides the
+/// dropdown, so the visibility must be sampled here, before it happens.
+pub fn left_click_pressed(app: &AppHandle) {
+    let open = app
+        .get_webview_window("dropdown")
+        .is_some_and(|w| w.is_visible().unwrap_or(false));
+    if let Some(guard) = app.try_state::<WasOpenAtDown>() {
+        *guard.inner().lock().unwrap_or_else(|p| p.into_inner()) = open;
+    }
+}
+
+/// Called on the left release: close if it was open at the press, otherwise
+/// show it next to the tray icon (spec 7.13).
+pub fn left_click_released(
+    app: &AppHandle,
+    click: crate::position::ClickRect,
+) -> Result<(), String> {
+    let was_open = app
+        .try_state::<WasOpenAtDown>()
+        .is_some_and(|g| *g.inner().lock().unwrap_or_else(|p| p.into_inner()));
+    if was_open {
+        hide_dropdown(app);
+        Ok(())
+    } else {
+        show_dropdown(app, Some(click))
+    }
+}
+
+/// Show the dropdown, placing it next to the tray icon when the click
+/// position is known (spec 7.13).
+pub fn show_dropdown(
+    app: &AppHandle,
+    click: Option<crate::position::ClickRect>,
+) -> Result<(), String> {
     let Some(window) = app.get_webview_window("dropdown") else {
         log::warn!("dropdown window not built yet");
-        return;
+        return Ok(());
     };
     if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
-        return;
-    }
-    let guard = app.state::<AutoHide>().inner().clone();
-    if guard
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
-    {
-        return;
+        let _ = window.set_focus();
+        return Ok(());
     }
     if let Some(click) = click {
         place_at(&window, click);
@@ -201,9 +223,9 @@ pub fn toggle_dropdown(app: &AppHandle, click: Option<crate::position::ClickRect
             place_at(&window, click_rect(&rect));
         }
     }
-    *guard.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let _ = window.show();
     let _ = window.set_focus();
+    Ok(())
 }
 
 /// Called by the dispatcher after Recording Mode starts (spec 7.1.4).
@@ -230,17 +252,16 @@ fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
-type AutoHide = std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>;
-
-/// Wire blur-close on the dropdown window: hide when it loses focus and
-/// remember when (for the 250 ms tray-click guard).
+/// Wire blur-close on the dropdown window: hide whenever it loses focus.
+/// The tray press handler samples visibility before this can fire, so the
+/// tray click still closes a dropdown it intentionally hid.
 pub fn attach_blur_close(window: &tauri::WebviewWindow) {
     let handle = window.clone();
-    let guard: AutoHide = std::sync::Arc::new(std::sync::Mutex::new(None));
-    window.app_handle().manage(guard.clone());
+    window
+        .app_handle()
+        .manage::<WasOpenAtDown>(std::sync::Arc::new(std::sync::Mutex::new(false)));
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
-            *guard.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
             let _ = handle.hide();
         }
     });

@@ -135,7 +135,7 @@ impl Default for Dropdown {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Apps {
-    /// Executable file names, lowercase (FR-43).
+    /// Executable file names, matched case-insensitively (FR-43).
     pub stays_on_screen: Vec<String>,
     pub hidden: Vec<String>,
 }
@@ -273,6 +273,12 @@ pub fn load(data_dir: &Path, now: OffsetDateTime) -> Result<SettingsRead, std::i
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SettingsRead::Fresh(Settings::default()));
         }
+        // read_to_string reports invalid UTF-8 as InvalidData: that is a
+        // corrupt file, not an error to surface (quarantine + defaults).
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            quarantine_invalid(data_dir, now)?;
+            return Ok(SettingsRead::Invalid(Settings::default()));
+        }
         Err(e) => return Err(e),
     };
 
@@ -299,7 +305,16 @@ pub fn load(data_dir: &Path, now: OffsetDateTime) -> Result<SettingsRead, std::i
         std::fs::write(backup, &text)?;
     }
 
-    let settings: Settings = serde_json::from_value(value).unwrap_or_default();
+    // A valid-JSON file whose types don't match (e.g. "hotkeys": 5) is
+    // corrupt for this build: quarantine it instead of silently starting
+    // from defaults while leaving the bad file in place.
+    let settings: Settings = match serde_json::from_value(value) {
+        Ok(s) => s,
+        Err(_) => {
+            quarantine_invalid(data_dir, now)?;
+            return Ok(SettingsRead::Invalid(Settings::default()));
+        }
+    };
     let mut settings = settings;
     settings.schema_version = SCHEMA_VERSION;
     if validate(&settings) {

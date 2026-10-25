@@ -134,7 +134,12 @@ fn save_state(path: &PathBuf, id: SwitchId, on: bool) {
         .unwrap_or_default();
     map.insert(id.to_string(), json!(on));
     // Best effort: losing fake state only means a fake switches back to off.
-    let _ = std::fs::write(path, serde_json::to_string(&map).unwrap_or_default());
+    // Atomic like the journal: a crash mid-write must not truncate the
+    // saved state of every fake (spec 7.4 protocol).
+    let _ = crate::write_atomic(
+        path,
+        serde_json::to_string(&map).unwrap_or_default().as_bytes(),
+    );
 }
 
 impl Switch for FakeSwitch {

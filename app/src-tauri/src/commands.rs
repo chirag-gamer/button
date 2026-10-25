@@ -24,11 +24,12 @@ pub enum IpcError {
 
 type IpcResult<T> = Result<T, IpcError>;
 
-/// Maps a dispatcher failure to its IPC code (spec 6.1).
+/// Maps a dispatcher failure to its IPC code (spec 6.1). Matched on the
+/// lowercased message so dispatcher and engine casings both map.
 fn map_error(message: String) -> IpcError {
-    match message.as_str() {
-        "A session is already active" => IpcError::SessionActive(message),
-        "No session is active" => IpcError::NoSession(message),
+    match message.to_lowercase().as_str() {
+        "a session is already active" => IpcError::SessionActive(message),
+        "no session is active" => IpcError::NoSession(message),
         _ => IpcError::NotAvailable(message),
     }
 }

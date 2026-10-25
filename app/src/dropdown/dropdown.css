@@ -1,4 +1,9 @@
 /* Dropdown panel layout (FR-2, FR-44). */
+/* display rules below must not defeat the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   overflow: hidden;
 }

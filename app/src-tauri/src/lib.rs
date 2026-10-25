@@ -159,10 +159,10 @@ pub fn run() {
             match automation::parse(&cli_args) {
                 Ok(action) => {
                     if let Err(message) = automation::run(app, action) {
-                        log::warn!("{message}");
+                        automation::notify(app, &message);
                     }
                 }
-                Err(message) => log::warn!("{message}"),
+                Err(message) => automation::notify(app, &message),
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -203,9 +203,16 @@ pub fn run() {
                 data_dir,
                 env!("CARGO_PKG_VERSION").to_string(),
             );
-            // Crash recovery runs before the tray is ready (spec 7.3). The
-            // FR-6 notification about it is sent by task 2.9.
-            let recovery = engine.recover(now).expect("recovery");
+            // Crash recovery runs before the tray is ready (spec 7.3). A
+            // failing recovery must not stop the app from booting: the
+            // journal stays on disk for the next launch.
+            let recovery = match engine.recover(now) {
+                Ok(report) => report,
+                Err(e) => {
+                    log::error!("launch recovery failed: {e}");
+                    session::RecoveryReport::default()
+                }
+            };
             let hotkey_binding = settings.hotkeys.recording_mode.clone();
 
             app.manage(std::sync::Mutex::new(crate::ButtonState {
@@ -218,13 +225,23 @@ pub fn run() {
                 },
                 os,
             }));
-            // FR-6: notify what launch recovery restored.
-            if !recovery.restored.is_empty() || !recovery.timers_to_rearm.is_empty() {
+            // FR-6: notify what launch recovery restored, including what
+            // failed to restore.
+            if !recovery.restored.is_empty()
+                || !recovery.timers_to_rearm.is_empty()
+                || !recovery.failed.is_empty()
+            {
                 use tauri_plugin_notification::NotificationExt;
-                let message = format!(
+                let mut message = format!(
                     "Restored {} switch(es) after an unexpected exit",
                     recovery.restored.len()
                 );
+                if !recovery.failed.is_empty() {
+                    message.push_str(&format!(
+                        ", {} could not be restored",
+                        recovery.failed.len()
+                    ));
+                }
                 let _ = app
                     .notification()
                     .builder()

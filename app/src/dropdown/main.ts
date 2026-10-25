@@ -139,6 +139,11 @@ startRestore.addEventListener("click", async () => {
   }
 });
 
+showAllButton.addEventListener("click", () => {
+  showAll = !showAll;
+  render();
+});
+
 // Escape closes the dropdown like a blur would.
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") void getCurrentWindow().hide();

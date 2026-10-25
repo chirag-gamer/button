@@ -73,12 +73,14 @@ pub fn journal_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// Parse the journal file if it exists (spec 5.2, 7.3).
 pub fn read(data_dir: &std::path::Path) -> JournalRead {
     let path = journal_path(data_dir);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    // Raw bytes: invalid UTF-8 must classify as Corrupt (quarantine at
+    // launch), not surface as an I/O error panic.
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return JournalRead::Missing,
         Err(e) => panic!("reading {}: {e}", path.display()),
     };
-    match serde_json::from_str::<Journal>(&text) {
+    match serde_json::from_slice::<Journal>(&bytes) {
         Ok(journal) => JournalRead::Ok(Box::new(journal)),
         Err(_) => JournalRead::Corrupt,
     }
