@@ -150,6 +150,10 @@ pub fn start_ticker(app: AppHandle) {
 }
 
 /// The tray event's rect in physical pixels, as position.rs wants it.
+/// tray-icon builds it from `Shell_NotifyIconGetRect`, which is always
+/// physical screen pixels, so `to_physical(1.0)` is a no-op on the
+/// Physical variant (icons inside the hidden-icons flyout report a rect
+/// with a different origin; the clamp keeps the window on-screen).
 fn click_rect(rect: &tauri::Rect) -> crate::position::ClickRect {
     let pos = rect.position.to_physical::<f64>(1.0);
     let size = rect.size.to_physical::<f64>(1.0);
@@ -187,6 +191,15 @@ pub fn toggle_dropdown(app: &AppHandle, click: Option<crate::position::ClickRect
     }
     if let Some(click) = click {
         place_at(&window, click);
+    } else {
+        // No click position (e.g. a second bare `button.exe` brought the
+        // dropdown up): anchor it at the tray icon instead of the default
+        // window position (spec 6.3, 7.13).
+        if let Some(handles) = app.try_state::<TrayHandles>()
+            && let Ok(Some(rect)) = handles.icon.rect()
+        {
+            place_at(&window, click_rect(&rect));
+        }
     }
     *guard.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let _ = window.show();

@@ -145,10 +145,10 @@ impl Default for Apps {
         Self {
             stays_on_screen: vec![
                 "obs64.exe".into(),
-                "snippingtool.exe".into(),
-                "sharex.exe".into(),
-                "loom.exe".into(),
-                "zoom.exe".into(),
+                "SnippingTool.exe".into(),
+                "ShareX.exe".into(),
+                "Loom.exe".into(),
+                "Zoom.exe".into(),
                 "ms-teams.exe".into(),
             ],
             hidden: Vec::new(),
@@ -350,12 +350,10 @@ fn validate(settings: &Settings) -> bool {
     if !is_valid_hex_colour(&settings.backdrop.color) {
         return false;
     }
-    settings
-        .apps
-        .stays_on_screen
-        .iter()
-        .chain(&settings.apps.hidden)
-        .all(|exe| exe.chars().all(|c| !c.is_uppercase()))
+    // App exe names are case-insensitive (spec 5.1): any casing is valid.
+    // Matching normalises with to_lowercase; save_settings normalises on
+    // write (Phase 5).
+    true
 }
 
 /// "#rrggbb" exactly.
@@ -450,6 +448,26 @@ mod tests {
         match load(&dir, now()).unwrap() {
             SettingsRead::Invalid(_) => {}
             other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uppercase_exe_names_are_valid_and_defaults_load() {
+        // Exe names are case-insensitive (spec 5.1): a user-typed
+        // "Zoom.exe" must not quarantine the file, and the shipped
+        // defaults (which contain capitals) must validate.
+        let dir = test_dir("uppercase-exe");
+        fs::write(
+            settings_path(&dir),
+            r#"{"schemaVersion":1,"apps":{"staysOnScreen":["Zoom.exe","OBS64.EXE"]}}"#,
+        )
+        .unwrap();
+        match load(&dir, now()).unwrap() {
+            SettingsRead::Loaded(s) => assert_eq!(
+                s.apps.stays_on_screen,
+                vec!["Zoom.exe".to_string(), "OBS64.EXE".to_string()]
+            ),
+            other => panic!("expected Loaded, got {other:?}"),
         }
     }
 
