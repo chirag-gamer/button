@@ -10,6 +10,15 @@ body {
   padding: 10px;
 }
 
+.warning {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
 .card {
   display: flex;
   align-items: center;

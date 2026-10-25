@@ -53,6 +53,13 @@ const more = document.getElementById("more")!;
 function render(): void {
   if (!state || !settings) return;
 
+  // FR-9: warn when the hotkey could not be registered.
+  const warning = document.getElementById("hotkey-warning")!;
+  warning.hidden = state.hotkey.registered;
+  if (!state.hotkey.registered) {
+    warning.textContent = `Hotkey ${state.hotkey.binding} could not be registered (in use by another app?)`;
+  }
+
   // Card (FR-2): the number of selected actions and Start/Restore.
   const selected = settings.recordingMode.actions.length;
   count.textContent = `${selected} action${selected === 1 ? "" : "s"}`;

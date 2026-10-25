@@ -1,5 +1,6 @@
 mod automation;
 pub mod commands;
+mod hotkeys;
 pub mod journal;
 pub mod os;
 pub mod position;
@@ -151,6 +152,7 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
             let os = os::detect();
@@ -176,13 +178,14 @@ pub fn run() {
             // Crash recovery runs before the tray is ready (spec 7.3). The
             // FR-6 notification about it is sent by task 2.9.
             let recovery = engine.recover(now).expect("recovery");
+            let hotkey_binding = settings.hotkeys.recording_mode.clone();
 
             app.manage(std::sync::Mutex::new(crate::ButtonState {
                 engine,
                 settings,
                 settings_read_only,
                 hotkey: crate::HotkeyState {
-                    binding: "Alt+R".into(),
+                    binding: hotkey_binding.clone(),
                     registered: false,
                 },
                 os,
@@ -212,6 +215,11 @@ pub fn run() {
             .content_protected(true)
             .build()?;
             tray::attach_blur_close(&dropdown);
+
+            // Global hotkey (FR-9): failure leaves registered=false and the
+            // dropdown warns (spec 7.11).
+            let registered = hotkeys::register_toggle(app.handle(), &hotkey_binding);
+            hotkeys::set_registered(app.handle(), &hotkey_binding, registered);
 
             // A CLI invocation runs its action and exits; `button.exe` with
             // no arguments behaves like the tray icon's left click later
