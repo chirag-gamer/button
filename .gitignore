@@ -1,0 +1,20 @@
+# Local-only planning docs (D-053): never committed
+plan.md
+prd.md
+spec.md
+decisions.md
+docs/
+research/
+spikes/
+
+# Build output and dependencies
+target/
+node_modules/
+dist/
+build/
+
+# Secrets and local state
+.env
+*.key
+*.log
+.DS_Store
