@@ -13,9 +13,10 @@ pub enum Action {
     Start,
     Stop,
     Toggle,
-    /// Toggle the dropdown window (tray left click, `button.exe` with no
-    /// args). Carries the click rect in physical pixels when known, so the
-    /// window can be placed next to the tray icon (spec 7.13).
+    /// Toggle the dropdown window (`button.exe` with no args; the tray
+    /// left click is handled directly in `tray.rs`). Carries the click
+    /// rect in physical pixels when known, so the window can be placed
+    /// next to the tray icon (spec 7.13).
     ShowDropdown {
         click: Option<crate::position::ClickRect>,
     },
