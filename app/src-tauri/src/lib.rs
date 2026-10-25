@@ -1,6 +1,7 @@
 pub mod journal;
 pub mod os;
 pub mod session;
+pub mod settings;
 pub mod switches;
 
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,23 @@ pub struct AppState {
     pub os: OsInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateState>,
+}
+
+/// Atomic write protocol (spec 7.4): write `<name>.tmp` in the same dir,
+/// sync, then rename over the target. std::fs::rename replaces an existing
+/// target on Windows (MoveFileExW; see spec 7.4 citation).
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let name = path.file_name().expect("path has a file name");
+    let tmp = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(format!("{}.tmp", name.to_string_lossy()));
+    let file = std::fs::File::create(&tmp)?;
+    (&file).write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

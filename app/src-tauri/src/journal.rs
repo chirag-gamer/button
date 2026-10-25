@@ -92,22 +92,11 @@ pub fn quarantine_corrupt(data_dir: &std::path::Path, now: OffsetDateTime) -> st
     std::fs::rename(from, to)
 }
 
-/// Atomic write (spec 7.4): serialize, write journal.json.tmp in the same dir,
-/// sync, then rename over journal.json. std::fs::rename replaces an existing
-/// target on Windows (MoveFileExW, see spec 7.4 citation).
+/// Atomic write (spec 7.4): serialize, then the shared tmp + sync + rename
+/// protocol (lib::write_atomic).
 pub fn write(journal: &Journal, data_dir: &std::path::Path) -> std::io::Result<()> {
     let text = serde_json::to_string(journal).expect("journal serializes");
-    let tmp = data_dir.join("journal.json.tmp");
-    let file = std::fs::File::create(&tmp)?;
-    {
-        use std::io::Write as _;
-        let mut writer = std::io::BufWriter::new(&file);
-        writer.write_all(text.as_bytes())?;
-        writer.flush()?;
-    }
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp, data_dir.join(JOURNAL_FILE))
+    crate::write_atomic(&data_dir.join(JOURNAL_FILE), text.as_bytes())
 }
 
 /// Delete the journal once everything is restored (spec 7.2).
