@@ -94,10 +94,6 @@ pub fn parse_switch_id(id: &str) -> Result<SwitchId, String> {
     serde_json::from_value(serde_json::json!(id)).map_err(|_| format!("unknown switch '{id}'"))
 }
 
-/// What launch-time recovery did; the FR-6 notification (task 2.9) reads it.
-#[allow(dead_code)]
-pub struct RecoveryNotice(pub crate::session::RecoveryReport);
-
 /// The work after every state change, in one place: tray icon/tooltip/menu
 /// text, then the state-changed event to the UI (spec 2.5 instruction).
 pub fn after_change(app: &AppHandle) {
@@ -132,9 +128,12 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
                 Some(Availability::Available) => {
                     // Registered in this build (debug fakes); execution of
                     // quick switches is Phase 4 (FR-27, FR-28).
-                    notify(&format!("{id} {on:?}: quick switches arrive in Phase 4"));
+                    notify(
+                        app,
+                        &format!("{id} {on:?}: quick switches arrive in Phase 4"),
+                    );
                 }
-                _ => notify(&format!("{id}: not available in this build")),
+                _ => notify(app, &format!("{id}: not available in this build")),
             }
             drop(b);
             return Ok(());
@@ -144,7 +143,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
                 Ok(_) => "Journal restored (if anything was left)".to_string(),
                 Err(e) => format!("Restore failed: {e}"),
             };
-            notify(&result);
+            notify(app, &result);
             drop(b);
             after_change(app);
             return Ok(());
@@ -155,6 +154,15 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
     // A started session closes the dropdown (spec 7.1.4).
     if !active {
         tray::hide_dropdown(app);
+    }
+    // Summary when a restore left failures behind (spec 7.2).
+    let state = app.state::<SharedState>();
+    let b = state.lock().unwrap_or_else(|p| p.into_inner());
+    let failed = b.engine.state().failed.len();
+    let idle = b.engine.state().status == SessionStatus::Idle;
+    drop(b);
+    if idle && failed > 0 {
+        notify(app, &format!("{failed} switch(es) failed to restore"));
     }
     Ok(())
 }
@@ -168,10 +176,30 @@ fn no_session() -> String {
 }
 
 /// Failures and CLI results go to a notification (spec 6.3: button has no
-/// console output). The notification plugin is wired up in task 2.9; until
-/// then these land in the log crate (no-op until 2.9 installs the logger).
-fn notify(message: &str) {
+/// console output) and to the log.
+pub(crate) fn notify(app: &AppHandle, message: &str) {
     log::warn!("{message}");
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title("button")
+        .body(message)
+        .show();
+}
+
+/// FR-8: restore an active session before the process ends. Runs on the
+/// main thread from RunEvent::Exit.
+pub fn restore_on_exit(app: &AppHandle) {
+    let state = app.state::<SharedState>();
+    let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
+    if b.engine.state().status == SessionStatus::Active {
+        let now = OffsetDateTime::now_utc();
+        match b.engine.stop(now) {
+            Ok(_) => log::info!("session restored before exit"),
+            Err(e) => log::error!("exit restore failed: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]

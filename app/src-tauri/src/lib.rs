@@ -166,6 +166,21 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            // ~5 rotated 1 MB files in the app log dir (spec 8).
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                .max_file_size(1024 * 1024)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .build(),
+        )
         .setup(|app| {
             use tauri::Manager;
             let os = os::detect();
@@ -203,7 +218,27 @@ pub fn run() {
                 },
                 os,
             }));
-            app.manage(automation::RecoveryNotice(recovery));
+            // FR-6: notify what launch recovery restored.
+            if !recovery.restored.is_empty() || !recovery.timers_to_rearm.is_empty() {
+                use tauri_plugin_notification::NotificationExt;
+                let message = format!(
+                    "Restored {} switch(es) after an unexpected exit",
+                    recovery.restored.len()
+                );
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("button")
+                    .body(&message)
+                    .show();
+                log::info!("{message}");
+            }
+
+            // Panics are logged; the journal survives for the next launch
+            // (spec 8).
+            std::panic::set_hook(Box::new(|info| {
+                log::error!("panic: {info}");
+            }));
 
             let tray_handles = tray::build(app.handle())?;
             app.manage(tray_handles);
@@ -241,13 +276,15 @@ pub fn run() {
             let cli_args: Vec<String> = std::env::args().skip(1).collect();
             match automation::parse(&cli_args) {
                 Ok(action) if !matches!(action, automation::Action::ShowDropdown { .. }) => {
+                    // Spec 6.3: with no instance running, this process
+                    // becomes the instance and runs the command. It stays
+                    // resident so the session (or dropdown) survives.
                     if let Err(message) = automation::run(app.handle(), action) {
-                        log::warn!("{message}");
+                        automation::notify(app.handle(), &message);
                     }
-                    app.handle().exit(0);
                 }
                 Err(error) => {
-                    log::warn!("{error}");
+                    automation::notify(app.handle(), &error);
                     app.handle().exit(0);
                 }
                 _ => {}
@@ -261,8 +298,15 @@ pub fn run() {
             crate::commands::stop_recording,
             crate::commands::toggle_recording,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // FR-8: an active session is restored before the process ends
+            // (Quit, sign-out, shutdown when Windows allows it).
+            if let tauri::RunEvent::Exit = event {
+                automation::restore_on_exit(_app);
+            }
+        });
 }
 
 #[cfg(test)]

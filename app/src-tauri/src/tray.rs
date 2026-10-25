@@ -35,7 +35,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         .tooltip("button")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "start-restore" => {
-                let _ = automation::run(app, Action::Toggle);
+                if let Err(message) = automation::run(app, Action::Toggle) {
+                    automation::notify(app, &message);
+                }
             }
             "quit" => app.exit(0),
             _ => {}
@@ -49,19 +51,23 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                 rect,
                 ..
             } => {
-                let _ = automation::run(
+                if let Err(message) = automation::run(
                     tray.app_handle(),
                     Action::ShowDropdown {
                         click: Some(click_rect(&rect)),
                     },
-                );
+                ) {
+                    automation::notify(tray.app_handle(), &message);
+                }
             }
             TrayIconEvent::Click {
                 button: MouseButton::Middle,
                 button_state: MouseButtonState::Up,
                 ..
             } => {
-                let _ = automation::run(tray.app_handle(), Action::Toggle);
+                if let Err(message) = automation::run(tray.app_handle(), Action::Toggle) {
+                    automation::notify(tray.app_handle(), &message);
+                }
             }
             _ => {}
         })
