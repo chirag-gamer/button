@@ -266,8 +266,8 @@ impl SessionEngine {
     }
 
     /// Restore entries oldest-to-newest reversed (last seq first). Only
-    /// entries whose deadline is due are touched; future timers stay
-    /// (spec 7.7). After each entry the journal is written again, so a
+    /// entries with no deadline or a due deadline are touched; future
+    /// timers stay (spec 7.7). After each entry the journal is written again, so a
     /// crash during restore resumes correctly (spec 7.2). A panic or a
     /// failing journal write mid-restore leaves the surviving entries on
     /// disk for the next recovery.
