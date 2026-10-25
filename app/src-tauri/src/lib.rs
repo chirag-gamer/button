@@ -152,6 +152,19 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin (spec 6.3): a second process forwards its
+        // args here and exits (FR-14).
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let cli_args: Vec<String> = args.iter().skip(1).cloned().collect();
+            match automation::parse(&cli_args) {
+                Ok(action) => {
+                    if let Err(message) = automation::run(app, action) {
+                        log::warn!("{message}");
+                    }
+                }
+                Err(message) => log::warn!("{message}"),
+            }
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
