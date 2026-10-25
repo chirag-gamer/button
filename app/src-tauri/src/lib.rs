@@ -1,6 +1,8 @@
 mod automation;
+pub mod commands;
 pub mod journal;
 pub mod os;
+pub mod position;
 pub mod session;
 pub mod settings;
 pub mod switches;
@@ -192,14 +194,35 @@ pub fn run() {
             tray::update_tray(app.handle());
             tray::start_ticker(app.handle().clone());
 
+            // The dropdown lives next to the tray icon: frameless, always on
+            // top, hidden until a tray click (spec 5.4 intro, 7.13). It is
+            // content-protected so captures don't show it (D-032).
+            let dropdown = tauri::WebviewWindowBuilder::new(
+                app,
+                "dropdown",
+                tauri::WebviewUrl::App("dropdown.html".into()),
+            )
+            .title("button")
+            .inner_size(320.0, 440.0)
+            .decorations(false)
+            .skip_taskbar(true)
+            .always_on_top(true)
+            .resizable(false)
+            .visible(false)
+            .content_protected(true)
+            .build()?;
+            tray::attach_blur_close(&dropdown);
+
             // A CLI invocation runs its action and exits; `button.exe` with
             // no arguments behaves like the tray icon's left click later
             // (task 2.6). Task 2.8 adds forwarding to the running instance.
             // Exit code is always 0 (spec 6.3, KNOW verified in 2.8).
             let cli_args: Vec<String> = std::env::args().skip(1).collect();
             match automation::parse(&cli_args) {
-                Ok(action) if action != automation::Action::ShowDropdown => {
-                    automation::run(app.handle(), action);
+                Ok(action) if !matches!(action, automation::Action::ShowDropdown { .. }) => {
+                    if let Err(message) = automation::run(app.handle(), action) {
+                        log::warn!("{message}");
+                    }
                     app.handle().exit(0);
                 }
                 Err(error) => {
@@ -210,6 +233,13 @@ pub fn run() {
             }
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::get_state,
+            crate::commands::get_settings,
+            crate::commands::start_recording,
+            crate::commands::stop_recording,
+            crate::commands::toggle_recording,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

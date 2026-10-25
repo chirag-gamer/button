@@ -34,7 +34,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         .icon(idle_icon())
         .tooltip("button")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "start-restore" => automation::run(app, Action::Toggle),
+            "start-restore" => {
+                let _ = automation::run(app, Action::Toggle);
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -44,13 +46,23 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
             TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
-            } => automation::run(tray.app_handle(), Action::ShowDropdown),
+            } => {
+                let _ = automation::run(
+                    tray.app_handle(),
+                    Action::ShowDropdown {
+                        click: Some(click_rect(&rect)),
+                    },
+                );
+            }
             TrayIconEvent::Click {
                 button: MouseButton::Middle,
                 button_state: MouseButtonState::Up,
                 ..
-            } => automation::run(tray.app_handle(), Action::Toggle),
+            } => {
+                let _ = automation::run(tray.app_handle(), Action::Toggle);
+            }
             _ => {}
         })
         .build(app)?;
@@ -131,20 +143,88 @@ pub fn start_ticker(app: AppHandle) {
     });
 }
 
-/// Toggle the dropdown window. The window exists from task 2.6 on; until
-/// then this is a no-op with a log line.
-pub fn toggle_dropdown(app: &AppHandle) {
-    match app.get_webview_window("dropdown") {
-        Some(window) => {
-            if window.is_visible().unwrap_or(false) {
-                let _ = window.hide();
-            } else {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }
-        None => log::warn!("dropdown window not built yet (task 2.6)"),
+/// The tray event's rect in physical pixels, as position.rs wants it.
+fn click_rect(rect: &tauri::Rect) -> crate::position::ClickRect {
+    let pos = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    crate::position::ScreenRect {
+        x: pos.x as i32,
+        y: pos.y as i32,
+        w: size.width as i32,
+        h: size.height as i32,
     }
+}
+
+/// Toggle the dropdown window, placing it next to the tray icon when the
+/// click position is known (spec 7.13).
+///
+/// Blur-close + the 250 ms guard: when the dropdown is open, clicking the
+/// tray icon first blurs it (auto-hide), then the toggle would show it
+/// again. The guard treats a recent auto-hide as "the user just closed it",
+/// so the tray click closes instead of re-opening.
+pub fn toggle_dropdown(app: &AppHandle, click: Option<crate::position::ClickRect>) {
+    let Some(window) = app.get_webview_window("dropdown") else {
+        log::warn!("dropdown window not built yet");
+        return;
+    };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+    let guard = app.state::<AutoHide>().inner().clone();
+    if guard
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+    {
+        return;
+    }
+    if let Some(click) = click {
+        place_at(&window, click);
+    }
+    *guard.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// Called by the dispatcher after Recording Mode starts (spec 7.1.4).
+pub fn hide_dropdown(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("dropdown") {
+        let _ = window.hide();
+    }
+}
+
+/// Position the window next to the tray icon's monitor work area.
+fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
+    let Some((monitor, work)) =
+        crate::position::monitor_work_area_at(click.x + click.w / 2, click.y + click.h / 2)
+    else {
+        return;
+    };
+    let size = window.outer_size().unwrap_or_default();
+    let (x, y) = crate::position::place(
+        &click,
+        &monitor,
+        &work,
+        (size.width as i32, size.height as i32),
+    );
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+type AutoHide = std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>;
+
+/// Wire blur-close on the dropdown window: hide when it loses focus and
+/// remember when (for the 250 ms tray-click guard).
+pub fn attach_blur_close(window: &tauri::WebviewWindow) {
+    let handle = window.clone();
+    let guard: AutoHide = std::sync::Arc::new(std::sync::Mutex::new(None));
+    window.app_handle().manage(guard.clone());
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            *guard.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+            let _ = handle.hide();
+        }
+    });
 }
 
 #[cfg(test)]

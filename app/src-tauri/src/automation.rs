@@ -13,8 +13,12 @@ pub enum Action {
     Start,
     Stop,
     Toggle,
-    /// Toggle the dropdown window (tray left click, `button.exe` with no args).
-    ShowDropdown,
+    /// Toggle the dropdown window (tray left click, `button.exe` with no
+    /// args). Carries the click rect in physical pixels when known, so the
+    /// window can be placed next to the tray icon (spec 7.13).
+    ShowDropdown {
+        click: Option<crate::position::ClickRect>,
+    },
     /// `button.exe switch <id> on|off|toggle`. Quick switches arrive in
     /// Phase 4; until then every switch reports NotBuilt (FR-27, FR-28).
     Switch {
@@ -45,7 +49,7 @@ pub fn parse(args: &[String]) -> Result<Action, String> {
     let mut args = args.iter().map(String::as_str);
     let first = args.next();
     match first {
-        None => Ok(Action::ShowDropdown),
+        None => Ok(Action::ShowDropdown { click: None }),
         Some("start") | Some("stop") | Some("toggle") | Some("restore") => {
             if args.next().is_some() {
                 return Err(format!(
@@ -105,23 +109,23 @@ pub fn after_change(app: &AppHandle) {
     let _ = app.emit("state-changed", app_state);
 }
 
-pub fn run(app: &AppHandle, action: Action) {
+pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
     let state = app.state::<SharedState>();
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
     let now = OffsetDateTime::now_utc();
 
     let active = b.engine.state().status == SessionStatus::Active;
-    let result = match action {
-        Action::Start if !active => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Start => Err(session_active()),
-        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Stop => Err(no_session()),
-        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Toggle => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::ShowDropdown => {
+    match action {
+        Action::Start if !active => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string())?,
+        Action::Start => return Err(session_active()),
+        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string())?,
+        Action::Stop => return Err(no_session()),
+        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string())?,
+        Action::Toggle => b.engine.start(now).map(|_| ()).map_err(|e| e.to_string())?,
+        Action::ShowDropdown { click } => {
             drop(b);
-            tray::toggle_dropdown(app);
-            return;
+            tray::toggle_dropdown(app, click);
+            return Ok(());
         }
         Action::Switch { id, on } => {
             match b.engine.switch_availability(id) {
@@ -133,23 +137,26 @@ pub fn run(app: &AppHandle, action: Action) {
                 _ => notify(&format!("{id}: not available in this build")),
             }
             drop(b);
-            return;
+            return Ok(());
         }
         Action::Restore => {
-            match b.engine.recover(now) {
-                Ok(_) => notify("Journal restored (if anything was left)"),
-                Err(e) => notify(&format!("Restore failed: {e}")),
-            }
+            let result = match b.engine.recover(now) {
+                Ok(_) => "Journal restored (if anything was left)".to_string(),
+                Err(e) => format!("Restore failed: {e}"),
+            };
+            notify(&result);
             drop(b);
             after_change(app);
-            return;
+            return Ok(());
         }
-    };
-    drop(b);
-    match result {
-        Ok(()) => after_change(app),
-        Err(e) => notify(&e),
     }
+    drop(b);
+    after_change(app);
+    // A started session closes the dropdown (spec 7.1.4).
+    if !active {
+        tray::hide_dropdown(app);
+    }
+    Ok(())
 }
 
 fn session_active() -> String {
@@ -177,7 +184,7 @@ mod tests {
 
     #[test]
     fn every_grammar_form_parses() {
-        assert_eq!(parse(&args(&[])), Ok(Action::ShowDropdown));
+        assert_eq!(parse(&args(&[])), Ok(Action::ShowDropdown { click: None }));
         assert_eq!(parse(&args(&["start"])), Ok(Action::Start));
         assert_eq!(parse(&args(&["stop"])), Ok(Action::Stop));
         assert_eq!(parse(&args(&["toggle"])), Ok(Action::Toggle));
