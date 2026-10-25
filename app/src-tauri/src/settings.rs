@@ -467,6 +467,31 @@ mod tests {
     }
 
     #[test]
+    fn type_mismatch_is_quarantined_like_corrupt_files() {
+        let dir = test_dir("type-mismatch");
+        fs::write(settings_path(&dir), r#"{"schemaVersion":1,"hotkeys":5}"#).unwrap();
+        match load(&dir, now()).unwrap() {
+            SettingsRead::Invalid(_) => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        // Quarantined out of the way, defaults take over.
+        assert!(!settings_path(&dir).exists());
+        let stamp = now().unix_timestamp();
+        assert!(dir.join(format!("settings.invalid-{stamp}.json")).exists());
+    }
+
+    #[test]
+    fn invalid_utf8_is_quarantined_like_corrupt_files() {
+        let dir = test_dir("invalid-utf8");
+        fs::write(settings_path(&dir), b"{\"schemaVersion\":1,\xff\xfe}").unwrap();
+        match load(&dir, now()).unwrap() {
+            SettingsRead::Invalid(_) => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        assert!(!settings_path(&dir).exists());
+    }
+
+    #[test]
     fn uppercase_exe_names_are_valid_and_defaults_load() {
         // Exe names are case-insensitive (spec 5.1): a user-typed
         // "Zoom.exe" must not quarantine the file, and the shipped

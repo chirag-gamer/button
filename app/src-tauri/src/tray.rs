@@ -198,7 +198,8 @@ pub fn left_click_released(
 }
 
 /// Show the dropdown, placing it next to the tray icon when the click
-/// position is known (spec 7.13).
+/// position is known (spec 7.13). `Action::ShowDropdown` is a toggle: a
+/// second invocation while the dropdown is visible closes it again.
 pub fn show_dropdown(
     app: &AppHandle,
     click: Option<crate::position::ClickRect>,
@@ -208,7 +209,7 @@ pub fn show_dropdown(
         return Ok(());
     };
     if window.is_visible().unwrap_or(false) {
-        let _ = window.set_focus();
+        let _ = window.hide();
         return Ok(());
     }
     if let Some(click) = click {

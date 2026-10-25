@@ -180,19 +180,17 @@ impl SessionEngine {
                 journal.entries.pop();
                 let _ = journal::write(journal, &self.data_dir);
                 // Undo everything this start applied so no change is left
-                // behind without a journal entry, then report. The engine
-                // stays reusable (idle, empty journal).
-                self.restore_all(now)?;
-                self.session = SessionState {
-                    status: SessionStatus::Idle,
-                    started_at: None,
-                    ends_at: None,
-                    applied: Vec::new(),
-                    skipped: Vec::new(),
-                    failed: Vec::new(),
-                };
-                self.journal = None;
-                let _ = journal::delete(&self.data_dir);
+                // behind without a journal entry. restore_all always
+                // returns the engine to Idle; whatever survives it (future
+                // timers, or entries its own writes could not remove) stays
+                // in the journal for the next recovery (spec 7.3), so only
+                // an empty journal is deleted.
+                let _ = self.restore_all(now);
+                if self.journal.as_ref().is_some_and(|j| j.entries.is_empty()) {
+                    self.journal = None;
+                    let _ = journal::delete(&self.data_dir);
+                }
+                self.session.started_at = None;
                 return Err(SessionError::Io(e));
             }
             if let Err(e) = switch.apply(&after) {
@@ -268,16 +266,27 @@ impl SessionEngine {
     }
 
     /// Restore entries oldest-to-newest reversed (last seq first). Only
-    /// entries without a pending deadline are touched; future timers stay
+    /// entries whose deadline is due are touched; future timers stay
     /// (spec 7.7). After each entry the journal is written again, so a
-    /// crash during restore resumes correctly (spec 7.2). A panic
-    /// mid-restore leaves the entry on disk for the next recovery.
+    /// crash during restore resumes correctly (spec 7.2). A panic or a
+    /// failing journal write mid-restore leaves the surviving entries on
+    /// disk for the next recovery.
+    ///
+    /// Always returns the engine to Idle: a failed restore keeps the
+    /// remaining entries in memory and on disk for a later recovery, and
+    /// start/stop keep working.
     fn restore_all(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
         if self.journal.is_none() {
             self.session.status = SessionStatus::Idle;
             return Ok(());
         }
         self.session.status = SessionStatus::Restoring;
+        let result = self.restore_entries(now);
+        self.session.status = SessionStatus::Idle;
+        result
+    }
+
+    fn restore_entries(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
         while let Some(idx) = self.journal.as_ref().and_then(|j| {
             j.entries
                 .iter()
@@ -294,10 +303,6 @@ impl SessionEngine {
                 journal::write(journal, &self.data_dir)?;
             }
         }
-        if self.journal.is_none() {
-            journal::delete(&self.data_dir)?;
-        }
-        self.session.status = SessionStatus::Idle;
         Ok(())
     }
 
@@ -529,6 +534,27 @@ mod tests {
         assert!(report.timers_to_rearm.is_empty());
         assert!(all_off(&rig));
         assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn failed_first_journal_write_rolls_back_and_stays_idle() {
+        // The data dir does not exist, so the pre-apply journal write
+        // fails: start must apply nothing, leave no journal behind, and
+        // return the engine to Idle - never stuck in Applying/Restoring.
+        let dir = test_dir("rollback");
+        let missing = dir.join("does-not-exist");
+        let mut rig = build(&missing, |_| opts(None, Availability::Available));
+        assert!(matches!(
+            rig.engine.start(now(), &IDS),
+            Err(SessionError::Io(_))
+        ));
+        assert_eq!(rig.engine.state().status, SessionStatus::Idle);
+        assert!(rig.handles.iter().all(|h| !h.is_on()));
+        assert!(matches!(journal::read(&missing), JournalRead::Missing));
+        // The engine stays usable: a start into a working directory works.
+        std::fs::create_dir_all(&missing).unwrap();
+        rig.engine.start(now(), &IDS).unwrap();
+        assert_eq!(rig.engine.state().status, SessionStatus::Active);
     }
 
     #[test]
