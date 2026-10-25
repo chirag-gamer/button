@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::journal::JournalEntry;
 use crate::os::OsInfo;
 
+#[cfg(any(test, debug_assertions))]
+pub mod fake;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwitchId {
@@ -39,6 +42,30 @@ pub const RECORDING_ORDER: [SwitchId; 10] = [
     SwitchId::NightLight,
 ];
 
+/// Kebab-case display, same as the serde name (used for log lines and the
+/// fake-switches.json keys).
+impl std::fmt::Display for SwitchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Dnd => "dnd",
+            Self::DesktopIcons => "desktop-icons",
+            Self::OtherApps => "other-apps",
+            Self::Taskbar => "taskbar",
+            Self::TrayIcons => "tray-icons",
+            Self::Backdrop => "backdrop",
+            Self::KeepAwake => "keep-awake",
+            Self::AlertSounds => "alert-sounds",
+            Self::DarkMode => "dark-mode",
+            Self::NightLight => "night-light",
+            Self::ScreenSaver => "screen-saver",
+            Self::Microphone => "microphone",
+            Self::LockKeyboard => "lock-keyboard",
+            Self::Bluetooth => "bluetooth",
+        };
+        f.write_str(name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Availability {
@@ -60,10 +87,7 @@ pub enum SwitchError {
     #[error("{0}")]
     NotAvailable(String),
     #[error("{api} failed with code {code}")]
-    Os {
-        api: &'static str,
-        code: i32,
-    },
+    Os { api: &'static str, code: i32 },
     #[error("{0}")]
     Invalid(String),
 }

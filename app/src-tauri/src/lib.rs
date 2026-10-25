@@ -1,6 +1,7 @@
-mod journal;
-mod os;
-mod switches;
+pub mod journal;
+pub mod os;
+pub mod session;
+pub mod switches;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -16,7 +17,11 @@ pub struct SwitchState {
     pub on: bool,
     pub availability: Availability,
     pub experimental: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub off_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -42,9 +47,17 @@ pub enum SessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
     pub status: SessionStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub started_at: Option<OffsetDateTime>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub ends_at: Option<OffsetDateTime>,
     pub applied: Vec<SwitchId>,
     pub skipped: Vec<SkippedSwitch>,
@@ -142,7 +155,10 @@ mod tests {
         assert!(json.contains("\"status\":\"idle\""), "{json}");
         assert!(json.contains("\"isWindows11\""), "{json}");
         assert!(json.contains("\"id\":\"desktop-icons\""), "{json}");
-        assert!(json.contains("\"availability\":\"needs-windows-11\""), "{json}");
+        assert!(
+            json.contains("\"availability\":\"needs-windows-11\""),
+            "{json}"
+        );
         assert!(json.contains("\"registered\":true"), "{json}");
         assert!(!json.contains("update"), "{json}");
     }

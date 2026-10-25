@@ -119,7 +119,6 @@ pub fn delete(data_dir: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,7 @@
 //! It never touches Windows. State shape: `{"on": bool}`.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
@@ -10,16 +10,23 @@ use super::{Availability, Ctx, RestoreOutcome, Switch, SwitchError, SwitchId};
 use crate::journal::JournalEntry;
 use crate::os::OsInfo;
 
-/// Test-mode options (spec 11): fail apply, fail restore, or panic at call N.
-/// The panic lands after the call completed, so low N means "before the fake
-/// changed anything" and higher N means "after it changed its value".
+/// Test-mode options (spec 11): fail apply, fail restore, or panic at call N
+/// — either before the call changes anything, or after it changed and saved
+/// its value (the dangerous crash window: entry journaled, state applied).
 #[derive(Debug, Clone)]
 pub struct FakeOptions {
     pub availability: Availability,
     pub persistent: bool,
     pub fail_apply: bool,
     pub fail_restore: bool,
-    pub panic_at_call: Option<usize>,
+    pub panic_at: Option<PanicAt>,
+}
+
+/// Where a fake should panic: at call N, before or after its mutation.
+#[derive(Debug, Clone, Copy)]
+pub struct PanicAt {
+    pub call: usize,
+    pub after_mutation: bool,
 }
 
 impl Default for FakeOptions {
@@ -29,7 +36,7 @@ impl Default for FakeOptions {
             persistent: false,
             fail_apply: false,
             fail_restore: false,
-            panic_at_call: None,
+            panic_at: None,
         }
     }
 }
@@ -43,7 +50,24 @@ pub struct FakeSwitch {
     id: SwitchId,
     options: FakeOptions,
     state_file: Option<PathBuf>,
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
+}
+
+/// Observable view of a fake's state, usable even after the owning engine
+/// was dropped (kill-point tests read and set the value through it).
+#[derive(Clone)]
+pub struct FakeHandle(Arc<Mutex<Inner>>);
+
+impl FakeHandle {
+    /// Read the current value; survives a poisoned mutex (the panicking call).
+    pub fn is_on(&self) -> bool {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).on
+    }
+
+    /// Simulate the user changing the value behind button's back.
+    pub fn set(&self, on: bool) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).on = on;
+    }
 }
 
 impl FakeSwitch {
@@ -53,7 +77,10 @@ impl FakeSwitch {
             id,
             options,
             state_file: None,
-            inner: Mutex::new(Inner { on: false, calls: 0 }),
+            inner: Arc::new(Mutex::new(Inner {
+                on: false,
+                calls: 0,
+            })),
         }
     }
 
@@ -66,20 +93,35 @@ impl FakeSwitch {
             id,
             options: FakeOptions::default(),
             state_file: Some(state_file),
-            inner: Mutex::new(Inner { on, calls: 0 }),
+            inner: Arc::new(Mutex::new(Inner { on, calls: 0 })),
         }
     }
 
+    pub fn handle(&self) -> FakeHandle {
+        FakeHandle(Arc::clone(&self.inner))
+    }
+
+    /// Panic check for the start of a call: fires when this call number
+    /// matches and the timing is "before mutation".
+    fn should_panic(&self, inner: &Inner) -> bool {
+        matches!(&self.options.panic_at, Some(p) if p.call == inner.calls && !p.after_mutation)
+    }
+
+    /// Panic check for the end of a mutating call (after the value changed
+    /// and any persistent state was saved).
+    fn panic_after_mutation(&self, inner: &Inner) -> bool {
+        matches!(&self.options.panic_at, Some(p) if p.after_mutation && p.call == inner.calls)
+    }
+
     pub fn is_on(&self) -> bool {
-        self.inner.lock().expect("fake lock").on
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).on
     }
 }
 
 fn load_state(path: &PathBuf, id: SwitchId) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&text).ok()?;
-    Some(map[id.to_string().as_str()]?.clone())
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
+    map.get(id.to_string().as_str()).cloned()
 }
 
 fn save_state(path: &PathBuf, id: SwitchId, on: bool) {
@@ -106,9 +148,9 @@ impl Switch for FakeSwitch {
     }
 
     fn read(&self) -> Result<serde_json::Value, SwitchError> {
-        let mut inner = self.inner.lock().expect("fake lock");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.calls += 1;
-        if Some(inner.calls) == self.options.panic_at_call {
+        if self.should_panic(&inner) {
             panic!("FakeSwitch {} panicked at call {}", self.id, inner.calls);
         }
         Ok(json!(inner.on))
@@ -119,9 +161,9 @@ impl Switch for FakeSwitch {
     }
 
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
-        let mut inner = self.inner.lock().expect("fake lock");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.calls += 1;
-        if Some(inner.calls) == self.options.panic_at_call {
+        if self.should_panic(&inner) {
             panic!("FakeSwitch {} panicked at call {}", self.id, inner.calls);
         }
         if self.options.fail_apply {
@@ -131,13 +173,19 @@ impl Switch for FakeSwitch {
         if let Some(path) = &self.state_file {
             save_state(path, self.id, inner.on);
         }
+        if self.panic_after_mutation(&inner) {
+            panic!(
+                "FakeSwitch {} panicked after apply {}",
+                self.id, inner.calls
+            );
+        }
         Ok(())
     }
 
     fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
-        let mut inner = self.inner.lock().expect("fake lock");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.calls += 1;
-        if Some(inner.calls) == self.options.panic_at_call {
+        if self.should_panic(&inner) {
             panic!("FakeSwitch {} panicked at call {}", self.id, inner.calls);
         }
         if self.options.fail_restore {
@@ -147,6 +195,12 @@ impl Switch for FakeSwitch {
             inner.on = e.before.as_bool().unwrap_or(false);
             if let Some(path) = &self.state_file {
                 save_state(path, self.id, inner.on);
+            }
+            if self.panic_after_mutation(&inner) {
+                panic!(
+                    "FakeSwitch {} panicked after restore {}",
+                    self.id, inner.calls
+                );
             }
             Ok(RestoreOutcome::Restored)
         } else {

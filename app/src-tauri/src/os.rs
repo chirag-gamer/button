@@ -14,8 +14,10 @@ pub struct OsInfo {
 }
 
 pub fn detect() -> OsInfo {
-    let mut info = OSVERSIONINFOW::default();
-    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
     // RtlGetVersion always returns STATUS_SUCCESS on Windows; failing here is impossible.
     let status = unsafe { RtlGetVersion(&mut info) };
     assert!(status.is_ok(), "RtlGetVersion failed with {:?}", status);
