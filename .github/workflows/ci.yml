@@ -1,0 +1,31 @@
+# CI: runs the full local check suite on every push and PR (spec 12).
+# The suite itself lives in scripts/check.ps1 and must stay runnable on
+# Windows PowerShell 5.1, which is exactly what this workflow invokes.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+
+      # PowerShell 5.1 (powershell.exe), not pwsh, per spec 11 / D-059.
+      - name: Run check.ps1
+        run: powershell -ExecutionPolicy Bypass -File scripts/check.ps1
