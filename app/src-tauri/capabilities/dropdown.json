@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "dropdown",
+  "description": "Dropdown panel: button's own commands plus event and window getters (spec 9)",
+  "windows": ["dropdown"],
+  "permissions": ["core:default", "core:event:allow-listen", "core:window:allow-hide"]
+}

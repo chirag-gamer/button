@@ -1,0 +1,128 @@
+/* Dropdown panel layout (FR-2, FR-44). */
+/* display rules below must not defeat the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  overflow: hidden;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.warning {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.card h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+
+button.primary {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button.primary.recording {
+  background: var(--danger);
+}
+
+button.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.shelf {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+.row:nth-child(odd) {
+  background: var(--surface);
+}
+
+.row .name {
+  flex: 1;
+}
+
+.row .badge {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.row .state {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.row .state.on {
+  background: var(--accent);
+}
+
+.row.unavailable .name,
+.row.unavailable .detail {
+  color: var(--muted);
+}
+
+.row .detail {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+button.link {
+  align-self: center;
+  padding: 4px;
+  font-size: 13px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
