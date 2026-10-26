@@ -38,6 +38,11 @@ struct BackdropWindow {
     /// creation index when the monitor reports no name).
     #[cfg_attr(test, allow(dead_code))]
     monitor: Option<String>,
+    /// The monitor's index in the launch enumeration — the unnamed
+    /// fallback. Stored, not derived from the snapshot position: earlier
+    /// windows that failed to build would shift the compacted indices.
+    #[cfg_attr(test, allow(dead_code))]
+    monitor_index: usize,
 }
 
 static WINDOWS: Mutex<Vec<BackdropWindow>> = Mutex::new(Vec::new());
@@ -108,6 +113,7 @@ pub fn create(app: &AppHandle, color: &str) {
                         label,
                         hwnd: hwnd.0 as isize,
                         monitor: monitor.name().cloned(),
+                        monitor_index: i,
                     }),
                     Err(e) => log::warn!("backdrop: {label} has no hwnd: {e}"),
                 }
@@ -144,13 +150,13 @@ pub fn show() -> Result<(), String> {
     let app2 = app.clone();
     app.run_on_main_thread(move || {
         let monitors = app2.available_monitors().ok();
-        for (i, w) in snapshot.iter().enumerate() {
+        for w in snapshot.iter() {
             let Some(window) = app2.get_webview_window(&w.label) else {
                 continue;
             };
             match monitors.as_ref() {
                 None => {} // no fresh bounds: show where it already is
-                Some(list) => match monitor_for(list, w, i) {
+                Some(list) => match monitor_for(list, w) {
                     // Fresh bounds for the monitor this window was
                     // created for.
                     Some(monitor) => {
@@ -182,21 +188,20 @@ pub fn show() -> Result<(), String> {
 }
 
 /// The monitor a backdrop window belongs to: by stored name when the
-/// monitor reports one, otherwise by the creation-order index (matching
-/// by index alone breaks when monitors are added, removed or reordered
-/// after launch).
+/// monitor reports one, otherwise by the monitor's creation index
+/// (matching by index alone breaks when monitors are added, removed or
+/// reordered after launch).
 #[cfg(not(test))]
 fn monitor_for<'m>(
     monitors: &'m [tauri::Monitor],
     window: &BackdropWindow,
-    index: usize,
 ) -> Option<&'m tauri::Monitor> {
     if let Some(name) = &window.monitor {
         return monitors
             .iter()
             .find(|m| m.name().is_some_and(|n| n == name));
     }
-    monitors.get(index)
+    monitors.get(window.monitor_index)
 }
 
 /// Hides every backdrop window. Best effort: hiding what does not exist
