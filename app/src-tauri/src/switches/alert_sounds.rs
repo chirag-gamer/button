@@ -38,7 +38,9 @@ impl Switch for AlertSounds {
     }
 
     fn persistent(&self) -> bool {
-        false // a live per-session mute; gone with the process (spec 7.3)
+        // The mute lives in the audio service, not in button's process:
+        // it outlives a crash, so recovery must unmute (spec 7.3).
+        true
     }
 
     fn read(&self) -> Result<serde_json::Value, SwitchError> {
@@ -66,12 +68,34 @@ impl Switch for AlertSounds {
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "alert sounds")?;
         let _guard = ComGuard::new()?;
-        for volume in system_sound_volumes()? {
-            unsafe {
-                volume
-                    .SetMute(target.muted, std::ptr::null())
-                    .map_err(os("ISimpleAudioVolume::SetMute"))?;
+        let volumes = system_sound_volumes()?;
+        if volumes.is_empty() {
+            // read() reports a vacuous "muted" here, so this only happens
+            // when the sessions vanished between read and apply. Saying Ok
+            // would journal an apply that never happened.
+            return Err(SwitchError::NotAvailable(
+                "no system-sounds session on the default endpoint".into(),
+            ));
+        }
+        // Per-session prior values, so a mid-way failure can put the
+        // earlier sessions back: the engine drops the entry on an apply
+        // error, and a partially muted endpoint would be left unjournaled.
+        let mut written: Vec<(ISimpleAudioVolume, bool)> = Vec::new();
+        for volume in volumes {
+            let prior = match unsafe { volume.GetMute() }.map_err(os("ISimpleAudioVolume::GetMute"))
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    rollback(&written);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = unsafe { volume.SetMute(target.muted, std::ptr::null()) } {
+                let e = os("ISimpleAudioVolume::SetMute")(e);
+                rollback(&written);
+                return Err(e);
             }
+            written.push((volume, prior.as_bool()));
         }
         Ok(())
     }
@@ -90,6 +114,16 @@ fn os(api: &'static str) -> impl Fn(windows::core::Error) -> SwitchError {
     move |e| SwitchError::Os {
         api,
         code: e.code().0,
+    }
+}
+
+/// Rollback for a failed apply: best effort, failures are logged — the
+/// original apply error is what reaches the session.
+fn rollback(volumes: &[(ISimpleAudioVolume, bool)]) {
+    for (volume, prior) in volumes.iter().rev() {
+        if let Err(e) = unsafe { volume.SetMute(*prior, std::ptr::null()) } {
+            log::warn!("alert-sounds: rollback failed: {e}");
+        }
     }
 }
 

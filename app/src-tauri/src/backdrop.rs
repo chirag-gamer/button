@@ -33,6 +33,11 @@ struct BackdropWindow {
     #[cfg_attr(test, allow(dead_code))]
     label: String,
     hwnd: isize,
+    /// The monitor's name at creation, so `show` can re-match after
+    /// monitors are added, removed or reordered (falls back to the
+    /// creation index when the monitor reports no name).
+    #[cfg_attr(test, allow(dead_code))]
+    monitor: Option<String>,
 }
 
 static WINDOWS: Mutex<Vec<BackdropWindow>> = Mutex::new(Vec::new());
@@ -102,6 +107,7 @@ pub fn create(app: &AppHandle, color: &str) {
                     Ok(hwnd) => windows.push(BackdropWindow {
                         label,
                         hwnd: hwnd.0 as isize,
+                        monitor: monitor.name().cloned(),
                     }),
                     Err(e) => log::warn!("backdrop: {label} has no hwnd: {e}"),
                 }
@@ -117,6 +123,12 @@ pub fn create(app: &AppHandle, color: &str) {
 /// front app in z-order (spec 7.9). The whole sequence runs on the main
 /// thread so `show` (which raises to the top) cannot clobber the z-order
 /// change.
+///
+/// Requires a front anchor: without one the backdrop would land on
+/// HWND_TOP and cover the screen, so a missing anchor fails the switch
+/// instead (the session keeps going without the backdrop, FR-7). A
+/// window whose z-order change fails is hidden again right away for the
+/// same reason.
 #[cfg(not(test))]
 pub fn show() -> Result<(), String> {
     let app = APP.get().ok_or("backdrop windows were not created")?;
@@ -127,8 +139,8 @@ pub fn show() -> Result<(), String> {
         }
         windows.clone()
     };
-    // HWND(0) = HWND_TOP, the fallback when no valid anchor exists.
-    let anchor = crate::front::backdrop_anchor().unwrap_or(0);
+    let anchor = crate::front::backdrop_anchor()
+        .ok_or("no front app to anchor the backdrop; not covering the screen")?;
     let app2 = app.clone();
     app.run_on_main_thread(move || {
         let monitors = app2.available_monitors().ok();
@@ -136,17 +148,55 @@ pub fn show() -> Result<(), String> {
             let Some(window) = app2.get_webview_window(&w.label) else {
                 continue;
             };
-            if let Some(monitor) = monitors.as_ref().and_then(|m| m.get(i)) {
-                let _ = window.set_position(*monitor.position());
-                let _ = window.set_size(*monitor.size());
+            match monitors.as_ref() {
+                None => {} // no fresh bounds: show where it already is
+                Some(list) => match monitor_for(list, w, i) {
+                    // Fresh bounds for the monitor this window was
+                    // created for.
+                    Some(monitor) => {
+                        let _ = window.set_position(*monitor.position());
+                        let _ = window.set_size(*monitor.size());
+                    }
+                    // The window's monitor is gone since launch: showing
+                    // it at stale bounds would put a dark rectangle
+                    // nowhere useful, so it stays hidden.
+                    None if w.monitor.is_some() => {
+                        let _ = window.hide();
+                        continue;
+                    }
+                    // Unnamed monitor: show at the existing bounds.
+                    None => {}
+                },
             }
             let _ = window.show();
-            place_below(w.hwnd, anchor);
+            if place_below(w.hwnd, anchor).is_err() {
+                // The anchor died between the pick and this call: without
+                // the z-order fix the backdrop would sit on top.
+                let _ = window.hide();
+            }
         }
     })
     .map_err(|e| format!("backdrop show failed: {e}"))?;
     SHOWN.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+/// The monitor a backdrop window belongs to: by stored name when the
+/// monitor reports one, otherwise by the creation-order index (matching
+/// by index alone breaks when monitors are added, removed or reordered
+/// after launch).
+#[cfg(not(test))]
+fn monitor_for<'m>(
+    monitors: &'m [tauri::Monitor],
+    window: &BackdropWindow,
+    index: usize,
+) -> Option<&'m tauri::Monitor> {
+    if let Some(name) = &window.monitor {
+        return monitors
+            .iter()
+            .find(|m| m.name().is_some_and(|n| n == name));
+    }
+    monitors.get(index)
 }
 
 /// Hides every backdrop window. Best effort: hiding what does not exist
@@ -205,13 +255,16 @@ pub fn on_foreground(hwnd: isize) {
     let snapshot: Vec<BackdropWindow> =
         { WINDOWS.lock().unwrap_or_else(|p| p.into_inner()).clone() };
     for w in snapshot {
-        place_below(w.hwnd, hwnd);
+        // A failure here is benign: the backdrop sits somewhere below the
+        // new foreground either way, because the foreground window rises
+        // above everything.
+        let _ = place_below(w.hwnd, hwnd);
     }
 }
 
-fn place_below(hwnd: isize, anchor: isize) {
+fn place_below(hwnd: isize, anchor: isize) -> windows::core::Result<()> {
     unsafe {
-        let _ = SetWindowPos(
+        SetWindowPos(
             HWND(hwnd as *mut core::ffi::c_void),
             Some(HWND(anchor as *mut core::ffi::c_void)),
             0,
@@ -219,7 +272,7 @@ fn place_below(hwnd: isize, anchor: isize) {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        )
     }
 }
 

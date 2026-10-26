@@ -302,15 +302,26 @@ mod tests {
                 SwitchId::KeepAwake
             ]
         );
-        // Spec 7.3 persistence: the taskbar auto-hide and the tray-icon
-        // promotion are saved Explorer settings (survive reboot); desktop
-        // icons, keep-awake, other-apps minimizations and the backdrop die
-        // with the process.
+        // Spec 7.3 persistence: every effect that outlives button's
+        // process is restored by crash recovery — Explorer state
+        // (desktop icons, taskbar auto-hide, tray-icon promotion),
+        // minimized windows (other-apps) and audio-service mutes
+        // (alert-sounds). Process-owned state (keep-awake, backdrop
+        // windows) dies with the process and is dropped.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
             .map(|s| s.id())
             .collect();
-        assert_eq!(persistent, vec![SwitchId::Taskbar, SwitchId::TrayIcons]);
+        assert_eq!(
+            persistent,
+            vec![
+                SwitchId::AlertSounds,
+                SwitchId::DesktopIcons,
+                SwitchId::OtherApps,
+                SwitchId::Taskbar,
+                SwitchId::TrayIcons
+            ]
+        );
     }
 }

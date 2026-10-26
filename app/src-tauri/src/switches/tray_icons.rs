@@ -34,6 +34,12 @@ pub struct State {
 pub struct IconEntry {
     pub key: String,
     pub is_promoted: Option<u32>,
+    /// This entry is button's own tray icon (matched by exe basename).
+    /// Additive with `#[serde(default)]`: journals written before this
+    /// field parse with `false`, which only affects `is_on` on stale
+    /// entries — restore never reads it.
+    #[serde(default)]
+    pub is_own: bool,
 }
 
 pub struct TrayIcons;
@@ -62,7 +68,6 @@ impl Switch for TrayIcons {
             icons: enumerate_states()?,
         }))
     }
-
     /// Re-enumerates (the journaled state carries no exe paths) and
     /// decides per key: button's own key stays promoted, Visible-shelf
     /// exes keep their prior value, everything else is demoted. On an
@@ -82,14 +87,16 @@ impl Switch for TrayIcons {
                         .find(|e| e.key == key)
                         .and_then(|e| e.is_promoted);
                     let expanded = raw_exe.as_deref().and_then(expand_known_folder);
+                    let is_own = exe_matches_own(expanded.as_deref(), &ctx.own_exe);
                     IconEntry {
                         key,
                         is_promoted: Some(decide(
+                            is_own,
                             expanded.as_deref(),
                             prior,
-                            &ctx.own_exe,
                             &ctx.tray_visible,
                         )),
+                        is_own,
                     }
                 })
                 .collect(),
@@ -103,22 +110,37 @@ impl Switch for TrayIcons {
 
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "tray icons")?;
-        for entry in target.icons {
+        // Values we already wrote, so a later failure can put them back:
+        // the engine drops the whole entry on an apply error, and an
+        // unjournaled half-applied switch would strand those icons.
+        let mut written: Vec<(String, Option<u32>)> = Vec::new();
+        for entry in &target.icons {
             let Some(key) = open_key(&entry.key) else {
                 log::info!("tray-icons: key {} vanished since target_on", entry.key);
                 continue;
             };
-            match entry.is_promoted {
+            let prior = key.get_u32("IsPromoted").ok();
+            let result = match entry.is_promoted {
                 Some(v) => key.set_u32("IsPromoted", v).map_err(|e| SwitchError::Os {
                     api: "RegSetValueEx",
                     code: e.code().0,
-                })?,
+                }),
                 None => {
                     // Absent is the desired state; removing an absent
                     // value is not an error.
                     if let Err(e) = key.remove_value("IsPromoted") {
                         log::info!("tray-icons: IsPromoted already absent: {e}");
                     }
+                    Ok(())
+                }
+            };
+            match result {
+                Ok(()) => written.push((entry.key.clone(), prior)),
+                Err(e) => {
+                    for (key_name, prior) in written.iter().rev() {
+                        rollback_key(key_name, *prior);
+                    }
+                    return Err(e);
                 }
             }
         }
@@ -168,26 +190,50 @@ impl Switch for TrayIcons {
         Ok(outcome(restored, user_changed))
     }
 
-    /// "On" reads as "nothing is promoted onto the taskbar".
+    /// "On" reads as "nothing but button's own icon is promoted onto the
+    /// taskbar" — the own icon stays promoted by rule ([D-072]), so it
+    /// never counts against the switch.
     fn is_on(&self, value: &serde_json::Value) -> bool {
         parse_state::<State>(value, "tray icons")
-            .map(|state| !state.icons.iter().any(|e| e.is_promoted == Some(1)))
+            .map(|state| {
+                !state
+                    .icons
+                    .iter()
+                    .any(|e| !e.is_own && e.is_promoted == Some(1))
+            })
             .unwrap_or(false)
     }
 }
 
 /// Button's own key stays promoted so the stop control stays reachable
 /// ([D-072]); Visible-shelf exes keep their prior value; everything else
-/// is demoted. `exe` is the expanded `ExecutablePath`.
-fn decide(exe: Option<&str>, prior: Option<u32>, own_exe: &str, visible: &[String]) -> u32 {
+/// is demoted. `is_own` comes from matching the expanded `ExecutablePath`
+/// by basename, because the registry stores full paths while
+/// `ctx.own_exe` is a bare exe name. Visible entries hold full paths
+/// (FR-30) and are compared as full paths.
+fn decide(is_own: bool, exe: Option<&str>, prior: Option<u32>, visible: &[String]) -> u32 {
     let exe = exe.unwrap_or("");
-    if same_exe(exe, own_exe) {
+    if is_own {
         1
     } else if visible.iter().any(|v| same_exe(v, exe)) {
         prior.unwrap_or(0)
     } else {
         0
     }
+}
+
+/// The exe name after the last path separator; quotes tolerated.
+fn exe_name(path: &str) -> &str {
+    let path = path.trim_matches('"');
+    let start = path.rfind(['\\', '/']).map_or(0, |i| i + 1);
+    &path[start..]
+}
+
+/// True when the expanded `ExecutablePath` is button's own exe, compared
+/// by basename: the registry stores full paths while `ctx.own_exe` is a
+/// bare exe name.
+fn exe_matches_own(exe: Option<&str>, own_exe: &str) -> bool {
+    exe.is_some_and(|e| same_exe(exe_name(e), own_exe))
 }
 
 fn outcome(restored: usize, user_changed: usize) -> RestoreOutcome {
@@ -229,8 +275,14 @@ fn snapshot() -> Result<Vec<(String, Option<String>)>, SwitchError> {
     Ok(out)
 }
 
-/// (key name, current `IsPromoted`; None = value absent) for `read()`.
+/// (key name, current `IsPromoted`; None = value absent) for `read()`,
+/// plus `is_own` so `is_on` can exclude button's icon. `own_exe` is the
+/// bare exe name of the running button.
 fn enumerate_states() -> Result<Vec<IconEntry>, SwitchError> {
+    let own_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
     let root = CURRENT_USER.open(ROOT).map_err(|e| SwitchError::Os {
         api: "RegOpenKeyEx",
         code: e.code().0,
@@ -240,13 +292,38 @@ fn enumerate_states() -> Result<Vec<IconEntry>, SwitchError> {
         api: "RegEnumKeyEx",
         code: e.code().0,
     })? {
-        let is_promoted = root
-            .open(&key)
-            .ok()
-            .and_then(|k| k.get_u32("IsPromoted").ok());
-        out.push(IconEntry { key, is_promoted });
+        let opened = root.open(&key).ok();
+        let is_promoted = opened.as_ref().and_then(|k| k.get_u32("IsPromoted").ok());
+        let expanded = opened
+            .as_ref()
+            .and_then(|k| k.get_string("ExecutablePath").ok())
+            .as_deref()
+            .and_then(expand_known_folder);
+        let is_own = exe_matches_own(expanded.as_deref(), &own_exe);
+        out.push(IconEntry {
+            key,
+            is_promoted,
+            is_own,
+        });
     }
     Ok(out)
+}
+
+/// Best effort: put one key's `IsPromoted` back to its prior value
+/// (None = remove) after a failed apply. Failures are logged, not
+/// returned — the original apply error is what reaches the session.
+fn rollback_key(key_name: &str, prior: Option<u32>) {
+    let Some(key) = open_key(key_name) else {
+        log::warn!("tray-icons: rollback: key {key_name} vanished");
+        return;
+    };
+    let result = match prior {
+        Some(v) => key.set_u32("IsPromoted", v),
+        None => key.remove_value("IsPromoted"),
+    };
+    if let Err(e) = result {
+        log::warn!("tray-icons: rollback of {key_name} failed: {e}");
+    }
 }
 
 /// `"{GUID}\rest"` → known folder path + rest; plain paths unchanged
@@ -281,11 +358,13 @@ mod tests {
             icons: vec![
                 IconEntry {
                     key: "abc".into(),
-                    is_promoted: Some(1)
+                    is_promoted: Some(1),
+                    is_own: false,
                 },
                 IconEntry {
                     key: "def".into(),
-                    is_promoted: None
+                    is_promoted: None,
+                    is_own: false,
                 },
             ]
         });
@@ -295,75 +374,106 @@ mod tests {
         assert!(parse_state::<State>(&serde_json::json!({}), "t").is_err());
     }
 
+    /// Journals written before `isOwn` existed still parse (additive
+    /// field, serde default false).
     #[test]
-    fn is_on_when_nothing_is_promoted() {
+    fn state_shape_accepts_entries_without_is_own() {
+        let value = serde_json::json!({
+            "icons": [{ "key": "abc", "isPromoted": 1 }]
+        });
+        let state = parse_state::<State>(&value, "t").unwrap();
+        assert_eq!(state.icons[0].is_promoted, Some(1));
+        assert!(!state.icons[0].is_own);
+    }
+
+    #[test]
+    fn is_on_when_nothing_but_the_own_icon_is_promoted() {
         let promoted = serde_json::json!(State {
             icons: vec![IconEntry {
                 key: "k".into(),
-                is_promoted: Some(1)
+                is_promoted: Some(1),
+                is_own: false,
             }]
         });
-        let demoted = serde_json::json!(State {
+        let own_promoted = serde_json::json!(State {
             icons: vec![
                 IconEntry {
-                    key: "k".into(),
-                    is_promoted: Some(0)
+                    key: "own".into(),
+                    is_promoted: Some(1),
+                    is_own: true,
                 },
                 IconEntry {
-                    key: "j".into(),
-                    is_promoted: None
+                    key: "k".into(),
+                    is_promoted: Some(0),
+                    is_own: false,
                 },
             ]
         });
         assert!(!TrayIcons.is_on(&promoted));
-        assert!(TrayIcons.is_on(&demoted));
+        assert!(TrayIcons.is_on(&own_promoted));
         assert!(!TrayIcons.is_on(&serde_json::json!({})));
     }
 
     #[test]
     fn decide_keeps_own_icon_promoted() {
-        let c = ctx(r"C:\button\button.exe", &[]);
+        let c = ctx("button.exe", &[]);
+        // The real shapes: ExecutablePath is a full path, ctx.own_exe is
+        // the bare name (the 3.8 review fix).
+        assert!(exe_matches_own(Some(r"C:\button\button.exe"), &c.own_exe));
+        assert!(exe_matches_own(Some(r"C:\BUTTON\BUTTON.EXE"), &c.own_exe));
+        assert!(!exe_matches_own(Some(r"C:\button\other.exe"), &c.own_exe));
         assert_eq!(
             decide(
-                Some(r"C:\BUTTON\BUTTON.EXE"),
-                Some(0),
-                &c.own_exe,
-                &c.tray_visible
-            ),
-            1
-        );
-        assert_eq!(
-            decide(
+                true,
                 Some(r"C:\button\button.exe"),
-                None,
-                &c.own_exe,
+                Some(0),
                 &c.tray_visible
             ),
             1
         );
+        assert_eq!(decide(true, None, None, &c.tray_visible), 1);
     }
 
     #[test]
     fn decide_keeps_visible_shelf_at_prior_value() {
-        let c = ctx(
-            r"C:\button\button.exe",
-            &[r"C:\Program Files\OBS\obs64.exe"],
-        );
+        let c = ctx("button.exe", &[r"C:\Program Files\OBS\obs64.exe"]);
         assert_eq!(
             decide(
+                false,
                 Some(r"c:\program files\obs\OBS64.EXE"),
                 Some(1),
-                &c.own_exe,
                 &c.tray_visible
             ),
             1
         );
         assert_eq!(
             decide(
+                false,
                 Some(r"C:\Program Files\OBS\obs64.exe"),
                 None,
-                &c.own_exe,
                 &c.tray_visible
+            ),
+            0
+        );
+        // The shelf holds full paths (FR-30): a bare name or a same-basename
+        // exe in another folder is demoted.
+        let c2 = ctx("button.exe", &["obs64.exe"]);
+        assert_eq!(
+            decide(
+                false,
+                Some(r"C:\Program Files\OBS\obs64.exe"),
+                Some(1),
+                &c2.tray_visible
+            ),
+            0
+        );
+        let c3 = ctx("button.exe", &[r"C:\elsewhere\obs64.exe"]);
+        assert_eq!(
+            decide(
+                false,
+                Some(r"C:\Program Files\OBS\obs64.exe"),
+                Some(1),
+                &c3.tray_visible
             ),
             0
         );
@@ -371,23 +481,18 @@ mod tests {
 
     #[test]
     fn decide_demotes_everything_else() {
-        let c = ctx(r"C:\button\button.exe", &[r"C:\keep\app.exe"]);
+        let c = ctx("button.exe", &[r"C:\keep\app.exe"]);
         assert_eq!(
-            decide(
-                Some(r"C:\other\app.exe"),
-                Some(1),
-                &c.own_exe,
-                &c.tray_visible
-            ),
+            decide(false, Some(r"C:\other\app.exe"), Some(1), &c.tray_visible),
             0
         );
         assert_eq!(
-            decide(None, None, &c.own_exe, &c.tray_visible),
+            decide(false, None, None, &c.tray_visible),
             0,
             "unresolvable path"
         );
         assert_eq!(
-            decide(Some(""), None, &c.own_exe, &c.tray_visible),
+            decide(false, Some(""), None, &c.tray_visible),
             0,
             "empty path"
         );

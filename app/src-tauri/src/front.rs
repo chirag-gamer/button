@@ -1,7 +1,11 @@
 //! Foreground tracker (spec 7.8). The WinEvent hook keeps the last few
 //! foreground windows; `front` picks the newest one that is still a valid
 //! window and not on Stays on Screen. The hook callback touches only its
-//! own mutex via `try_lock`: no app state, no blocking, no I/O, no panic.
+//! own mutex via `try_lock`: no app state, no blocking, no panic. One
+//! exception to the no-I/O rule: while a backdrop is visible, the callback
+//! resolves the foreground window's exe (`backdrop_event_ok`, spec 7.9) —
+//! that path runs only during a backdrop session and never blocks on app
+//! state.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

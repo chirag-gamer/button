@@ -6,7 +6,10 @@ fn main() {
     // STATUS_ENTRYPOINT_NOT_FOUND before main runs. Embed the same
     // manifest tauri-build uses (windows-app-manifest.xml) into every
     // test target as well.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    // MSVC linker flags; a windows-gnu toolchain would reject them.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
         let manifest = r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>

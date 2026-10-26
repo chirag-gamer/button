@@ -79,7 +79,9 @@ impl Switch for OtherApps {
     }
 
     fn persistent(&self) -> bool {
-        false // windows do not survive a reboot; recovery drops the entry
+        // Minimization outlives the process (the windows stay minimized),
+        // so crash recovery must put them back (spec 7.3).
+        true
     }
 
     fn read(&self) -> Result<serde_json::Value, SwitchError> {
@@ -90,16 +92,23 @@ impl Switch for OtherApps {
 
     /// The visible candidates minus the front app's process, button itself
     /// and Stays on Screen, each with a fresh `WINDOWPLACEMENT` (read-only
-    /// work stays in target_on; apply only mutates, spec 7.8).
+    /// work stays in target_on; apply only mutates, spec 7.8). When no
+    /// front app is tracked (hook failure), the switch does nothing:
+    /// without a front process there is no way to tell the app being
+    /// shown apart from the ones to hide, and minimizing the foreground
+    /// app would be wrong.
     fn target_on(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
         let before = parse_state::<State>(before, "other apps").unwrap_or(State {
             windows: Vec::new(),
         });
-        let front_pid = ctx.front.as_ref().map(|f| f.pid);
+        let Some(front_pid) = ctx.front.as_ref().map(|f| f.pid) else {
+            log::warn!("other-apps: no front app tracked; leaving windows alone");
+            return serde_json::json!(before);
+        };
         let windows = before
             .windows
             .into_iter()
-            .filter(|entry| keep(entry, front_pid, ctx.own_pid, &ctx.stays_on_screen))
+            .filter(|entry| keep(entry, Some(front_pid), ctx.own_pid, &ctx.stays_on_screen))
             .filter_map(|entry| {
                 // Re-validate what could have changed since read(): the
                 // window must still exist, be visible and not be minimized
@@ -134,6 +143,7 @@ impl Switch for OtherApps {
         let after = parse_state::<State>(&e.after, "other apps")?;
         let mut restored = 0;
         let mut user_changed = 0;
+        let mut last_error: Option<SwitchError> = None;
         for entry in after.windows {
             let Some(hwnd) = hwnd_of(entry.hwnd) else {
                 continue;
@@ -158,16 +168,32 @@ impl Switch for OtherApps {
                 match SetWindowPlacement(hwnd, &placement_of_entry(&entry)) {
                     Ok(()) => restored += 1,
                     Err(err) => {
+                        // Swallowing this would drop the journaled entry
+                        // with the window still minimized and no record
+                        // of it (the engine reports failed entries to
+                        // the user, spec 7.3).
                         let raw = entry.hwnd;
-                        log::warn!("other-apps: hwnd {raw:#x} did not restore: {err}")
+                        log::warn!("other-apps: hwnd {raw:#x} did not restore: {err}");
+                        last_error = Some(SwitchError::Os {
+                            api: "SetWindowPlacement",
+                            code: err.code().0,
+                        });
                     }
                 }
             }
         }
+        if let Some(e) = last_error {
+            return Err(e);
+        }
         Ok(outcome(restored, user_changed))
     }
 
-    /// "On" reads as "nothing eligible is visible any more".
+    /// "On" reads as "no candidate is visible any more". Best effort: the
+    /// trait's `is_on` gets no `Ctx`, so the front app's and Stays on
+    /// Screen windows still count as candidates here — during a session
+    /// the flag can read off even though every eligible window is
+    /// minimized (spec 7.8; the 4.1 switch-list UI replaces this with a
+    /// ctx-aware check).
     fn is_on(&self, value: &serde_json::Value) -> bool {
         parse_state::<State>(value, "other apps")
             .map(|state| state.windows.is_empty())
@@ -238,7 +264,11 @@ fn candidates() -> Result<Vec<Entry>, SwitchError> {
 unsafe extern "system" fn collect(h: HWND, lparam: LPARAM) -> BOOL {
     unsafe {
         let out = &mut *(lparam.0 as *mut Vec<(HWND, u32)>);
-        if !IsWindowVisible(h).as_bool() {
+        // Minimized windows are still "visible" in the IsWindowVisible
+        // sense but are not candidates: they are already where Recording
+        // Mode would put them, and counting them keeps is_on off after
+        // apply.
+        if !IsWindowVisible(h).as_bool() || IsIconic(h).as_bool() {
             return BOOL(1);
         }
         if GetWindow(h, GW_OWNER).is_ok() {

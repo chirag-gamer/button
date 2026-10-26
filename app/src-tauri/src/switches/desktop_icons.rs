@@ -1,8 +1,8 @@
 //! Hide Desktop Icons (FR-15, spec 7.5). Toggles Explorer's own "Show
 //! desktop icons" command (`WM_COMMAND 0x7402`) on the desktop's
 //! `SHELLDLL_DefView` (under `Progman`, else under a `WorkerW`). Icons never
-//! move. The toggle is Explorer runtime state, not a saved setting, so it
-//! does not survive a reboot (spec 7.3: non-persistent).
+//! move. The toggle lives in Explorer, so it outlives button's process and
+//! crash recovery restores it (spec 7.3: persistent).
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, WPARAM};
@@ -37,7 +37,9 @@ impl Switch for DesktopIcons {
     }
 
     fn persistent(&self) -> bool {
-        false
+        // The toggle is Explorer's state, not button-owned process state:
+        // it outlives a crash, so recovery must undo it (spec 7.3).
+        true
     }
 
     fn read(&self) -> Result<serde_json::Value, SwitchError> {

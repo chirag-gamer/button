@@ -9,7 +9,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::System::Power::{
-    ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE,
+    SetThreadExecutionState,
 };
 
 use super::{Availability, Ctx, Switch, SwitchError, SwitchId, parse_state};
@@ -124,17 +125,8 @@ fn worker(rx: Receiver<Command>) {
                 display: new_display,
                 reply,
             } => {
-                let flags = if new_on {
-                    let mut flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED;
-                    if new_display {
-                        flags |= ES_DISPLAY_REQUIRED;
-                    }
-                    flags
-                } else {
-                    ES_CONTINUOUS
-                };
                 // 0 means the call failed (KNOW, probe line 344).
-                let prev = unsafe { SetThreadExecutionState(flags) };
+                let prev = unsafe { SetThreadExecutionState(flags_for(new_on, new_display)) };
                 if prev.0 == 0 {
                     let _ = reply.send(Err(SwitchError::Os {
                         api: "SetThreadExecutionState",
@@ -153,6 +145,20 @@ fn worker(rx: Receiver<Command>) {
     }
     // Channel closed: the switch was dropped. The OS clears the request
     // when this thread (or the process) exits.
+}
+
+/// `ES_CONTINUOUS` plus the requested requirements; `ES_CONTINUOUS` alone
+/// clears the request (KNOW).
+fn flags_for(on: bool, display: bool) -> EXECUTION_STATE {
+    if on {
+        let mut flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED;
+        if display {
+            flags |= ES_DISPLAY_REQUIRED;
+        }
+        flags
+    } else {
+        ES_CONTINUOUS
+    }
 }
 
 #[cfg(test)]
@@ -201,25 +207,16 @@ mod tests {
         );
     }
 
-    /// Applies and clears the real request around the assertions. The
-    /// effect lasts microseconds and clears itself on drop — no undo
-    /// needed; `powercfg /requests` lists nothing after the test.
+    /// The flag mapping, tested purely: the real `apply` touches the
+    /// machine's power state, so the round trip itself is verified in the
+    /// manual matrix (M-1), not in unit tests (read-only test policy).
     #[test]
-    fn apply_round_trips_through_the_worker_thread() {
-        let switch = KeepAwake::new();
-        switch
-            .apply(&serde_json::json!(State {
-                on: true,
-                display: true
-            }))
-            .unwrap();
-        assert!(switch.read().unwrap().to_string().contains("\"on\":true"));
-        switch
-            .apply(&serde_json::json!(State {
-                on: false,
-                display: false
-            }))
-            .unwrap();
-        assert!(switch.read().unwrap().to_string().contains("\"on\":false"));
+    fn flags_map_the_state() {
+        assert_eq!(flags_for(false, false), ES_CONTINUOUS);
+        assert_eq!(flags_for(true, false), ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+        assert_eq!(
+            flags_for(true, true),
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+        );
     }
 }
