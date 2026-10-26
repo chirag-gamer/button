@@ -42,7 +42,7 @@ pub enum SwitchId {
 pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
     // data_dir comes back into use if a later switch needs disk state.
     let _ = data_dir;
-    let mut switches: Vec<Box<dyn Switch>> = vec![
+    let switches: Vec<Box<dyn Switch>> = vec![
         Box::new(alert_sounds::AlertSounds),
         Box::new(desktop_icons::DesktopIcons),
         Box::new(other_apps::OtherApps),
@@ -51,9 +51,11 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
         Box::new(tray_icons::TrayIcons),
         Box::new(keep_awake::KeepAwake::new()),
     ];
+    // BUTTON_FAIL is a debug-only feature (M-6), so only debug builds
+    // rebuild the vec.
     #[cfg(debug_assertions)]
-    if let Ok(fail_id) = std::env::var("BUTTON_FAIL") {
-        switches = switches
+    let switches = match std::env::var("BUTTON_FAIL") {
+        Ok(fail_id) => switches
             .into_iter()
             .map(|s| {
                 if s.id().to_string() == fail_id {
@@ -62,8 +64,9 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
                     s
                 }
             })
-            .collect();
-    }
+            .collect(),
+        Err(_) => switches,
+    };
     switches
 }
 
