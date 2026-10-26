@@ -15,6 +15,7 @@ mod desktop_icons;
 mod keep_awake;
 mod other_apps;
 mod taskbar;
+mod tray_icons;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -47,6 +48,7 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
         Box::new(other_apps::OtherApps),
         Box::new(backdrop::Backdrop),
         Box::new(taskbar::Taskbar),
+        Box::new(tray_icons::TrayIcons),
         Box::new(keep_awake::KeepAwake::new()),
     ];
     #[cfg(debug_assertions)]
