@@ -9,6 +9,8 @@ use crate::os::OsInfo;
 #[cfg(test)]
 pub mod fake;
 
+mod desktop_icons;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwitchId {
@@ -32,9 +34,9 @@ pub enum SwitchId {
 /// Phase 3 tasks land them, in debug and release alike; the list is empty
 /// until 3.1 (D-067). Tests get the fakes instead.
 pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    // data_dir comes back into use as the real switches land (3.1+).
+    // data_dir comes back into use by later fakes (3.2+ removes the last one).
     let _ = data_dir;
-    let mut switches: Vec<Box<dyn Switch>> = Vec::new();
+    let mut switches: Vec<Box<dyn Switch>> = vec![Box::new(desktop_icons::DesktopIcons)];
     #[cfg(test)]
     switches.extend(test_fakes(data_dir));
     #[cfg(debug_assertions)]
@@ -82,6 +84,10 @@ impl Switch for FailOnApply {
         self.inner.read()
     }
 
+    fn is_on(&self, value: &serde_json::Value) -> bool {
+        self.inner.is_on(value)
+    }
+
     fn target_on(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
         self.inner.target_on(before, ctx)
     }
@@ -98,14 +104,12 @@ impl Switch for FailOnApply {
     }
 }
 
-/// The fakes, compiled for tests only (D-063 as updated by D-067).
+/// The fakes for switches that are not real yet, compiled for tests only
+/// (D-063 as updated by D-067). Each fake disappears when its real switch
+/// lands (desktop icons went real in 3.1).
 #[cfg(test)]
 fn test_fakes(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
     vec![
-        Box::new(fake::FakeSwitch::persistent(
-            SwitchId::DesktopIcons,
-            data_dir.to_path_buf(),
-        )),
         Box::new(fake::FakeSwitch::persistent(
             SwitchId::Taskbar,
             data_dir.to_path_buf(),
@@ -207,6 +211,12 @@ pub trait Switch: Send + Sync {
     fn persistent(&self) -> bool;
 
     fn read(&self) -> Result<serde_json::Value, SwitchError>;
+
+    /// How the UI reads "on" from this switch's state (spec 5.4): the
+    /// default fits bool states; structured states override it.
+    fn is_on(&self, value: &serde_json::Value) -> bool {
+        value.as_bool().unwrap_or(false)
+    }
 
     fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value;
 

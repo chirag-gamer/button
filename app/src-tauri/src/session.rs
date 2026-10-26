@@ -91,7 +91,7 @@ impl SessionEngine {
                     .and_then(|e| e.off_at);
                 crate::SwitchState {
                     id: s.id(),
-                    on: s.read().is_ok_and(|v| v.as_bool().unwrap_or(false)),
+                    on: s.read().map(|v| s.is_on(&v)).unwrap_or(false),
                     availability: s.availability(&self.os),
                     experimental: s.experimental(),
                     off_at,

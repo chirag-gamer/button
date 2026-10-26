@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_two_persistent_fakes_and_keep_awake() {
+    fn test_registry_has_one_real_and_two_fakes() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -301,14 +301,14 @@ mod tests {
                 SwitchId::KeepAwake
             ]
         );
-        // D-067: the test-only registry keeps the D-063 split — desktop
-        // icons and taskbar persist via their fake state file, keep-awake
-        // is memory-only. Production registers real switches as 3.1+ lands.
+        // D-067: desktop icons went real in 3.1 (non-persistent, spec 7.3);
+        // the taskbar fake persists via its fake state file, keep-awake is
+        // memory-only. Production registers real switches as 3.1+ lands.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
             .map(|s| s.id())
             .collect();
-        assert_eq!(persistent, vec![SwitchId::DesktopIcons, SwitchId::Taskbar]);
+        assert_eq!(persistent, vec![SwitchId::Taskbar]);
     }
 }
