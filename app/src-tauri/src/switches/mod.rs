@@ -9,6 +9,14 @@ use crate::os::OsInfo;
 #[cfg(test)]
 pub mod fake;
 
+mod alert_sounds;
+mod backdrop;
+mod desktop_icons;
+mod keep_awake;
+mod other_apps;
+mod taskbar;
+mod tray_icons;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwitchId {
@@ -29,17 +37,25 @@ pub enum SwitchId {
 }
 
 /// The registered switches (spec 2.1). Real switches register here as their
-/// Phase 3 tasks land them, in debug and release alike; the list is empty
-/// until 3.1 (D-067). Tests get the fakes instead.
+/// Phase 3 tasks land them, in debug and release alike (D-067). Session
+/// tests build their own fake rigs instead.
 pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    // data_dir comes back into use as the real switches land (3.1+).
+    // data_dir comes back into use if a later switch needs disk state.
     let _ = data_dir;
-    let mut switches: Vec<Box<dyn Switch>> = Vec::new();
-    #[cfg(test)]
-    switches.extend(test_fakes(data_dir));
+    let switches: Vec<Box<dyn Switch>> = vec![
+        Box::new(alert_sounds::AlertSounds),
+        Box::new(desktop_icons::DesktopIcons),
+        Box::new(other_apps::OtherApps),
+        Box::new(backdrop::Backdrop),
+        Box::new(taskbar::Taskbar),
+        Box::new(tray_icons::TrayIcons),
+        Box::new(keep_awake::KeepAwake::new()),
+    ];
+    // BUTTON_FAIL is a debug-only feature (M-6), so only debug builds
+    // rebuild the vec.
     #[cfg(debug_assertions)]
-    if let Ok(fail_id) = std::env::var("BUTTON_FAIL") {
-        switches = switches
+    let switches = match std::env::var("BUTTON_FAIL") {
+        Ok(fail_id) => switches
             .into_iter()
             .map(|s| {
                 if s.id().to_string() == fail_id {
@@ -48,8 +64,9 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
                     s
                 }
             })
-            .collect();
-    }
+            .collect(),
+        Err(_) => switches,
+    };
     switches
 }
 
@@ -82,6 +99,10 @@ impl Switch for FailOnApply {
         self.inner.read()
     }
 
+    fn is_on(&self, value: &serde_json::Value) -> bool {
+        self.inner.is_on(value)
+    }
+
     fn target_on(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
         self.inner.target_on(before, ctx)
     }
@@ -96,25 +117,6 @@ impl Switch for FailOnApply {
     fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
         self.inner.restore(e)
     }
-}
-
-/// The fakes, compiled for tests only (D-063 as updated by D-067).
-#[cfg(test)]
-fn test_fakes(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    vec![
-        Box::new(fake::FakeSwitch::persistent(
-            SwitchId::DesktopIcons,
-            data_dir.to_path_buf(),
-        )),
-        Box::new(fake::FakeSwitch::persistent(
-            SwitchId::Taskbar,
-            data_dir.to_path_buf(),
-        )),
-        Box::new(fake::FakeSwitch::new(
-            SwitchId::KeepAwake,
-            fake::FakeOptions::default(),
-        )),
-    ]
 }
 
 /// Recording Mode's fixed apply order (spec 7.1).
@@ -207,6 +209,12 @@ pub trait Switch: Send + Sync {
     fn persistent(&self) -> bool;
 
     fn read(&self) -> Result<serde_json::Value, SwitchError>;
+
+    /// How the UI reads "on" from this switch's state (spec 5.4): the
+    /// default fits bool states; structured states override it.
+    fn is_on(&self, value: &serde_json::Value) -> bool {
+        value.as_bool().unwrap_or(false)
+    }
 
     fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value;
 

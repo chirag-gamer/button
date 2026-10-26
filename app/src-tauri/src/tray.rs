@@ -224,9 +224,6 @@ pub fn show_dropdown(
             place_at(&window, click_rect(&rect));
         }
     }
-    // Temporary (task 3.0): dump the foreground census so the owner can
-    // tell us which shell popups to ignore (Start, Search, ...).
-    crate::front::dump_census();
     let _ = window.show();
     let _ = window.set_focus();
     Ok(())
@@ -288,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_two_persistent_fakes_and_keep_awake() {
+    fn test_registry_has_the_seven_phase3_switches() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -296,19 +293,35 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                SwitchId::AlertSounds,
                 SwitchId::DesktopIcons,
+                SwitchId::OtherApps,
+                SwitchId::Backdrop,
                 SwitchId::Taskbar,
+                SwitchId::TrayIcons,
                 SwitchId::KeepAwake
             ]
         );
-        // D-067: the test-only registry keeps the D-063 split — desktop
-        // icons and taskbar persist via their fake state file, keep-awake
-        // is memory-only. Production registers real switches as 3.1+ lands.
+        // Spec 7.3 persistence: every effect that outlives button's
+        // process is restored by crash recovery — Explorer state
+        // (desktop icons, taskbar auto-hide, tray-icon promotion),
+        // minimized windows (other-apps) and audio-service mutes
+        // (alert-sounds). Process-owned state (keep-awake, backdrop
+        // windows) dies with the process and is dropped.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
             .map(|s| s.id())
             .collect();
-        assert_eq!(persistent, vec![SwitchId::DesktopIcons, SwitchId::Taskbar]);
+        assert_eq!(
+            persistent,
+            vec![
+                SwitchId::AlertSounds,
+                SwitchId::DesktopIcons,
+                SwitchId::OtherApps,
+                SwitchId::Taskbar,
+                SwitchId::TrayIcons
+            ]
+        );
     }
 }

@@ -91,7 +91,7 @@ impl SessionEngine {
                     .and_then(|e| e.off_at);
                 crate::SwitchState {
                     id: s.id(),
-                    on: s.read().is_ok_and(|v| v.as_bool().unwrap_or(false)),
+                    on: s.read().map(|v| s.is_on(&v)).unwrap_or(false),
                     availability: s.availability(&self.os),
                     experimental: s.experimental(),
                     off_at,
@@ -111,6 +111,7 @@ impl SessionEngine {
         selected: &[SwitchId],
         ctx: &Ctx,
     ) -> Result<&SessionState, SessionError> {
+        let begun = std::time::Instant::now();
         if self.session.status != SessionStatus::Idle {
             return Err(SessionError::AlreadyActive);
         }
@@ -209,6 +210,15 @@ impl SessionEngine {
             self.session.applied.push(id);
         }
         self.session.status = SessionStatus::Active;
+        // G-1 evidence (prd.md §6): apply time from Start to recording-ready,
+        // excluding the countdown, which runs before this in the app layer.
+        log::info!(
+            "start: {} applied, {} skipped, {} failed in {} ms",
+            self.session.applied.len(),
+            self.session.skipped.len(),
+            self.session.failed.len(),
+            begun.elapsed().as_millis()
+        );
         Ok(&self.session)
     }
 

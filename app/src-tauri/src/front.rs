@@ -1,7 +1,11 @@
 //! Foreground tracker (spec 7.8). The WinEvent hook keeps the last few
 //! foreground windows; `front` picks the newest one that is still a valid
 //! window and not on Stays on Screen. The hook callback touches only its
-//! own mutex via `try_lock`: no app state, no blocking, no I/O, no panic.
+//! own mutex via `try_lock`: no app state, no blocking, no panic. One
+//! exception to the no-I/O rule: while a backdrop is visible, the callback
+//! resolves the foreground window's exe (`backdrop_event_ok`, spec 7.9) —
+//! that path runs only during a backdrop session and never blocks on app
+//! state.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -27,8 +31,6 @@ pub struct FrontApp {
 }
 
 const RING_CAP: usize = 8;
-const CENSUS_CAP: usize = 64;
-
 #[derive(Debug)]
 struct Entry {
     hwnd: isize,
@@ -38,15 +40,10 @@ struct Entry {
 #[derive(Debug, Default)]
 struct State {
     ring: VecDeque<Entry>,
-    // Temporary (task 3.0): every foreground (class, pid) pair, deduped, so
-    // the owner can tell us which shell popups to ignore. The exe is
-    // resolved at dump time, keeping the hook callback cheap.
-    census: Vec<(String, u32)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     ring: VecDeque::new(),
-    census: Vec::new(),
 });
 
 // HWINEVENTHOOK is not Sync, so the raw handle is stored as an isize
@@ -94,23 +91,34 @@ pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
     pick(&state.ring, stays_on_screen, is_window, exe_of_pid)
 }
 
-/// Temporary (task 3.0): log and clear the foreground census so the owner
-/// can tell us which shell popup class+exe pairs to ignore. Removed once
-/// the ignore list is settled.
-///
-/// The exe is best-effort: the callback records only the cheap (class, pid)
-/// pair, so the exe is resolved here at dump time. A process that exited
-/// since its event logs as unavailable; a recycled pid can mislabel a row.
-/// Acceptable for a temporary diagnostic — the shell popups this census
-/// hunts stay alive through a pass, and every dump re-collects fresh.
-pub fn dump_census() {
-    let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    for (class, pid) in state.census.drain(..) {
-        match exe_of_pid(pid) {
-            Some(exe) => log::info!("foreground census: class={class} exe={exe}"),
-            None => log::info!("foreground census: class={class} pid={pid} (exe unavailable)"),
-        }
+/// The backdrop's z-order anchor (spec 7.9): the newest ring entry that
+/// passes the class and exe ignores, WITHOUT the Stays-on-Screen filter —
+/// the backdrop sits behind the recorder too; that is the point of a clean
+/// recording background.
+#[cfg_attr(test, allow(dead_code))] // only show() calls this; stubbed in tests
+pub(crate) fn backdrop_anchor() -> Option<isize> {
+    let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    pick(&state.ring, &[], is_window, exe_of_pid).map(|f| f.hwnd)
+}
+
+/// Whether a foreground event should move the backdrop (spec 7.9): not a
+/// shell surface, not button, and the process resolves to a non-ignored
+/// exe. This resolves the exe on the hook path — but only while a backdrop
+/// is visible; the idle path is one atomic load in backdrop.rs.
+pub(crate) fn backdrop_event_ok(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
     }
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    if is_ignored_class(&class_of(h)) {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    matches!(exe_of_pid(pid), Some(exe) if !is_ignored_exe(&exe))
 }
 
 unsafe extern "system" fn fg_cb(
@@ -123,6 +131,7 @@ unsafe extern "system" fn fg_cb(
     _time: u32,
 ) {
     record(hwnd);
+    crate::backdrop::on_foreground(hwnd.0 as isize);
 }
 
 /// Hook-callback side: cheap reads only (class name + pid). Opening the
@@ -137,20 +146,16 @@ fn record(hwnd: HWND) {
     if pid == 0 || pid == std::process::id() {
         return;
     }
-    if let Ok(mut state) = STATE.try_lock() {
-        let known = state.census.iter().any(|(c, p)| c == &class && p == &pid);
-        if !known && state.census.len() < CENSUS_CAP {
-            state.census.push((class.clone(), pid));
-        }
-        if !is_ignored_class(&class) {
-            push_entry(
-                &mut state.ring,
-                Entry {
-                    hwnd: hwnd.0 as isize,
-                    pid,
-                },
-            );
-        }
+    if let Ok(mut state) = STATE.try_lock()
+        && !is_ignored_class(&class)
+    {
+        push_entry(
+            &mut state.ring,
+            Entry {
+                hwnd: hwnd.0 as isize,
+                pid,
+            },
+        );
     }
 }
 
@@ -226,7 +231,7 @@ fn class_of(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn exe_of_pid(pid: u32) -> Option<String> {
+pub(crate) fn exe_of_pid(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
