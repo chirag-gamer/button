@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_real_switches_and_the_keep_awake_fake() {
+    fn test_registry_has_the_three_phase3_switches() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -301,9 +301,9 @@ mod tests {
                 SwitchId::KeepAwake
             ]
         );
-        // D-067: desktop icons went real in 3.1, taskbar in 3.2 (the real
-        // taskbar is a saved setting, the real icons toggle is not, spec
-        // 7.3); keep-awake is the last fake, memory-only.
+        // Spec 7.3 persistence: the taskbar auto-hide is a saved Explorer
+        // setting (survives reboot), the desktop-icons toggle and the
+        // keep-awake request die with the process.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
