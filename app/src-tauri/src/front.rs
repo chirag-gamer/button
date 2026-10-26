@@ -96,6 +96,12 @@ pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
 /// Temporary (task 3.0): log and clear the foreground census so the owner
 /// can tell us which shell popup class+exe pairs to ignore. Removed once
 /// the ignore list is settled.
+///
+/// The exe is best-effort: the callback records only the cheap (class, pid)
+/// pair, so the exe is resolved here at dump time. A process that exited
+/// since its event logs as unavailable; a recycled pid can mislabel a row.
+/// Acceptable for a temporary diagnostic — the shell popups this census
+/// hunts stay alive through a pass, and every dump re-collects fresh.
 pub fn dump_census() {
     let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
     for (class, pid) in state.census.drain(..) {
