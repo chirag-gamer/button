@@ -94,6 +94,36 @@ pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
     pick(&state.ring, stays_on_screen, is_window, exe_of_pid)
 }
 
+/// The backdrop's z-order anchor (spec 7.9): the newest ring entry that
+/// passes the class and exe ignores, WITHOUT the Stays-on-Screen filter —
+/// the backdrop sits behind the recorder too; that is the point of a clean
+/// recording background.
+#[cfg_attr(test, allow(dead_code))] // only show() calls this; stubbed in tests
+pub(crate) fn backdrop_anchor() -> Option<isize> {
+    let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    pick(&state.ring, &[], is_window, exe_of_pid).map(|f| f.hwnd)
+}
+
+/// Whether a foreground event should move the backdrop (spec 7.9): not a
+/// shell surface, not button, and the process resolves to a non-ignored
+/// exe. This resolves the exe on the hook path — but only while a backdrop
+/// is visible; the idle path is one atomic load in backdrop.rs.
+pub(crate) fn backdrop_event_ok(hwnd: isize) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    if is_ignored_class(&class_of(h)) {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    if pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    matches!(exe_of_pid(pid), Some(exe) if !is_ignored_exe(&exe))
+}
+
 /// Temporary (task 3.0): log and clear the foreground census so the owner
 /// can tell us which shell popup class+exe pairs to ignore. Removed once
 /// the ignore list is settled.
@@ -123,6 +153,7 @@ unsafe extern "system" fn fg_cb(
     _time: u32,
 ) {
     record(hwnd);
+    crate::backdrop::on_foreground(hwnd.0 as isize);
 }
 
 /// Hook-callback side: cheap reads only (class name + pid). Opening the

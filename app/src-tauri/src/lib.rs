@@ -1,4 +1,5 @@
 mod automation;
+mod backdrop;
 pub mod com;
 pub mod commands;
 mod front;
@@ -198,6 +199,7 @@ pub fn run() {
                 | settings::SettingsRead::Invalid(s)
                 | settings::SettingsRead::Newer(s) => s,
             };
+            let backdrop_color = settings.backdrop.color.clone();
 
             let mut engine = session::SessionEngine::new(
                 switches::build_registry(&data_dir),
@@ -267,6 +269,11 @@ pub fn run() {
             // The foreground hook must be installed on the main thread: its
             // events arrive on that thread's message pump (spec 2.3, 7.8).
             front::install();
+
+            // The backdrop windows exist from launch, hidden (D-071):
+            // WebviewWindowBuilder deadlocks inside sync commands, so they
+            // can only be created here, one per monitor present at launch.
+            backdrop::create(app.handle(), &backdrop_color);
 
             // The dropdown lives next to the tray icon: frameless, always on
             // top, hidden until a tray click (spec 5.4 intro, 7.13). It is

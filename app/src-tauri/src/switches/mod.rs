@@ -10,6 +10,7 @@ use crate::os::OsInfo;
 pub mod fake;
 
 mod alert_sounds;
+mod backdrop;
 mod desktop_icons;
 mod keep_awake;
 mod other_apps;
@@ -44,6 +45,7 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
         Box::new(alert_sounds::AlertSounds),
         Box::new(desktop_icons::DesktopIcons),
         Box::new(other_apps::OtherApps),
+        Box::new(backdrop::Backdrop),
         Box::new(taskbar::Taskbar),
         Box::new(keep_awake::KeepAwake::new()),
     ];

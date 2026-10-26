@@ -10,6 +10,7 @@ export default defineConfig(() => ({
     rollupOptions: {
       input: {
         dropdown: "dropdown.html",
+        backdrop: "backdrop.html",
       },
     },
   },

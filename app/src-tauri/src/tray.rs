@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_the_five_phase3_switches() {
+    fn test_registry_has_the_six_phase3_switches() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -299,13 +299,14 @@ mod tests {
                 SwitchId::AlertSounds,
                 SwitchId::DesktopIcons,
                 SwitchId::OtherApps,
+                SwitchId::Backdrop,
                 SwitchId::Taskbar,
                 SwitchId::KeepAwake
             ]
         );
         // Spec 7.3 persistence: the taskbar auto-hide is a saved Explorer
-        // setting (survives reboot); desktop icons, keep-awake and the
-        // other-apps minimizations die with the process.
+        // setting (survives reboot); desktop icons, keep-awake, other-apps
+        // minimizations and the backdrop die with the process.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
