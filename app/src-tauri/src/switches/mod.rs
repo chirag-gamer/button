@@ -10,6 +10,7 @@ use crate::os::OsInfo;
 pub mod fake;
 
 mod desktop_icons;
+mod taskbar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -34,11 +35,14 @@ pub enum SwitchId {
 /// Phase 3 tasks land them, in debug and release alike; the list is empty
 /// until 3.1 (D-067). Tests get the fakes instead.
 pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    // data_dir comes back into use by later fakes (3.2+ removes the last one).
+    // data_dir comes back into use by later fakes (3.3 removes the last one).
     let _ = data_dir;
-    let mut switches: Vec<Box<dyn Switch>> = vec![Box::new(desktop_icons::DesktopIcons)];
+    let mut switches: Vec<Box<dyn Switch>> = vec![
+        Box::new(desktop_icons::DesktopIcons),
+        Box::new(taskbar::Taskbar),
+    ];
     #[cfg(test)]
-    switches.extend(test_fakes(data_dir));
+    switches.extend(test_fakes());
     #[cfg(debug_assertions)]
     if let Ok(fail_id) = std::env::var("BUTTON_FAIL") {
         switches = switches
@@ -106,19 +110,13 @@ impl Switch for FailOnApply {
 
 /// The fakes for switches that are not real yet, compiled for tests only
 /// (D-063 as updated by D-067). Each fake disappears when its real switch
-/// lands (desktop icons went real in 3.1).
+/// lands (desktop icons went real in 3.1, taskbar in 3.2).
 #[cfg(test)]
-fn test_fakes(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    vec![
-        Box::new(fake::FakeSwitch::persistent(
-            SwitchId::Taskbar,
-            data_dir.to_path_buf(),
-        )),
-        Box::new(fake::FakeSwitch::new(
-            SwitchId::KeepAwake,
-            fake::FakeOptions::default(),
-        )),
-    ]
+fn test_fakes() -> Vec<Box<dyn Switch>> {
+    vec![Box::new(fake::FakeSwitch::new(
+        SwitchId::KeepAwake,
+        fake::FakeOptions::default(),
+    ))]
 }
 
 /// Recording Mode's fixed apply order (spec 7.1).
