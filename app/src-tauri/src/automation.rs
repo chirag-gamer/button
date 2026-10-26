@@ -132,23 +132,26 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
 
     let active = b.engine.state().status == SessionStatus::Active;
     let selected = b.settings.recording_mode.actions.clone();
-    let ctx = build_ctx(&b.settings);
     let mut started = false;
     let result: Result<(), String> = match action {
-        Action::Start if !active => b
-            .engine
-            .start(now, &selected, &ctx)
-            .map(|_| started = true)
-            .map_err(|e| e.to_string()),
+        Action::Start if !active => {
+            let ctx = build_ctx(&b.settings);
+            b.engine
+                .start(now, &selected, &ctx)
+                .map(|_| started = true)
+                .map_err(|e| e.to_string())
+        }
         Action::Start => Err(session_active()),
         Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
         Action::Stop => Err(no_session()),
         Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Toggle => b
-            .engine
-            .start(now, &selected, &ctx)
-            .map(|_| started = true)
-            .map_err(|e| e.to_string()),
+        Action::Toggle => {
+            let ctx = build_ctx(&b.settings);
+            b.engine
+                .start(now, &selected, &ctx)
+                .map(|_| started = true)
+                .map_err(|e| e.to_string())
+        }
         Action::ShowDropdown { click } => {
             drop(b);
             tray::show_dropdown(app, click)?;

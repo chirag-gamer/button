@@ -274,18 +274,21 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn fail_on_apply_wraps_apply_only() {
+        let fake = fake::FakeSwitch::new(SwitchId::KeepAwake, fake::FakeOptions::default());
+        let handle = fake.handle();
+        handle.set(true); // the fake sits in the `after` state
         let wrapped = FailOnApply {
-            inner: Box::new(fake::FakeSwitch::new(
-                SwitchId::KeepAwake,
-                fake::FakeOptions::default(),
-            )),
+            inner: Box::new(fake),
         };
         assert!(wrapped.read().is_ok());
         assert!(matches!(
             wrapped.apply(&serde_json::json!(true)),
             Err(SwitchError::NotAvailable(_))
         ));
-        // restore stays delegated, so nothing else changes behaviour.
+        // With current == after, a delegated restore applies `before` through
+        // the fake and reports Restored. The trait's default restore would
+        // call this wrapper's failing apply instead and error out — the
+        // assertion catches exactly that regression.
         let entry = JournalEntry {
             seq: 0,
             owner: JournalOwner::Recording,
@@ -298,7 +301,7 @@ mod tests {
         };
         assert!(matches!(
             wrapped.restore(&entry),
-            Ok(RestoreOutcome::UserChanged)
+            Ok(RestoreOutcome::Restored)
         ));
     }
 }
