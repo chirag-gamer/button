@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_the_three_phase3_switches() {
+    fn test_registry_has_the_four_phase3_switches() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -296,6 +296,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                SwitchId::AlertSounds,
                 SwitchId::DesktopIcons,
                 SwitchId::Taskbar,
                 SwitchId::KeepAwake

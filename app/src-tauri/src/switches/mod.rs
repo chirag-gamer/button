@@ -9,6 +9,7 @@ use crate::os::OsInfo;
 #[cfg(test)]
 pub mod fake;
 
+mod alert_sounds;
 mod desktop_icons;
 mod keep_awake;
 mod taskbar;
@@ -39,6 +40,7 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
     // data_dir comes back into use if a later switch needs disk state.
     let _ = data_dir;
     let mut switches: Vec<Box<dyn Switch>> = vec![
+        Box::new(alert_sounds::AlertSounds),
         Box::new(desktop_icons::DesktopIcons),
         Box::new(taskbar::Taskbar),
         Box::new(keep_awake::KeepAwake::new()),
