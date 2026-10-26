@@ -171,12 +171,16 @@ fn push_entry(ring: &mut VecDeque<Entry>, entry: Entry) {
     }
 }
 
-/// Classes that must never be the front app (spec 7.8): the taskbars and
-/// the desktop itself.
+/// Classes that must never be the front app (spec 7.8): the taskbars, the
+/// desktop itself, and the tray overflow flyout (census 2026-10-26).
 fn is_ignored_class(class: &str) -> bool {
     matches!(
         class,
-        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "TopLevelWindowForOverflowXamlIsland"
     )
 }
 
@@ -257,12 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn ignored_classes_are_exactly_the_documented_four() {
+    fn ignored_classes_are_exactly_the_documented_list() {
         for class in [
             "Progman",
             "WorkerW",
             "Shell_TrayWnd",
             "Shell_SecondaryTrayWnd",
+            "TopLevelWindowForOverflowXamlIsland",
         ] {
             assert!(is_ignored_class(class));
         }
