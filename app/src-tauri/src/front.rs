@@ -86,8 +86,9 @@ pub fn unhook() {
 }
 
 /// The newest foreground window that is still a valid window, whose process
-/// still resolves to an exe, and that is not on Stays on Screen (spec 7.8,
-/// D-066). The exe lookup runs here, once per start — never in the hook.
+/// still resolves to an exe, and that is neither on Stays on Screen nor a
+/// shell flyout host (spec 7.8, D-066, D-073). The exe lookup runs here,
+/// once per start — never in the hook.
 pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
     let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
     pick(&state.ring, stays_on_screen, is_window, exe_of_pid)
@@ -164,10 +165,11 @@ fn pick(
             return None;
         }
         let exe = exe_of(e.pid)?;
-        if stays_on_screen
+        let excluded = stays_on_screen
             .iter()
             .any(|s| crate::switches::same_exe(s, &exe))
-        {
+            || is_ignored_exe(&exe);
+        if excluded {
             return None;
         }
         Some(FrontApp {
@@ -190,7 +192,10 @@ fn push_entry(ring: &mut VecDeque<Entry>, entry: Entry) {
 }
 
 /// Classes that must never be the front app (spec 7.8): the taskbars, the
-/// desktop itself, and the tray overflow flyout (census 2026-10-26).
+/// desktop itself, and the shell popup surfaces from the 2026-10-26 census —
+/// the tray overflow flyout; Start, Task View and the Alt+Tab switcher
+/// (`XamlExplorerHostIslandWindow`); Quick Settings (`ControlCenterWindow`);
+/// and the transient staging window flyout animations push forward.
 fn is_ignored_class(class: &str) -> bool {
     matches!(
         class,
@@ -199,6 +204,19 @@ fn is_ignored_class(class: &str) -> bool {
             | "Shell_TrayWnd"
             | "Shell_SecondaryTrayWnd"
             | "TopLevelWindowForOverflowXamlIsland"
+            | "XamlExplorerHostIslandWindow"
+            | "ControlCenterWindow"
+            | "ForegroundStaging"
+    )
+}
+
+/// Exes whose windows are shell flyouts even though the window class
+/// (`Windows.UI.Core.CoreWindow`) is shared with real apps, so the exe
+/// decides (census 2026-10-26; StartMenuExperienceHost is the Win10 Start).
+fn is_ignored_exe(exe: &str) -> bool {
+    matches!(
+        exe,
+        "SearchHost.exe" | "ShellExperienceHost.exe" | "StartMenuExperienceHost.exe"
     )
 }
 
@@ -234,10 +252,13 @@ mod tests {
         Entry { hwnd, pid }
     }
 
-    /// Test exe resolver: pid 2 poses as OBS, pid 22 has exited.
+    /// Test exe resolver: pid 2 poses as OBS, pid 22 has exited, pids 3/5
+    /// are shell flyout hosts behind the shared CoreWindow class.
     fn exe_of(pid: u32) -> Option<String> {
         match pid {
             2 => Some("obs64.exe".to_string()),
+            3 => Some("SearchHost.exe".to_string()),
+            5 => Some("ShellExperienceHost.exe".to_string()),
             22 => None,
             _ => Some("app.exe".to_string()),
         }
@@ -301,9 +322,24 @@ mod tests {
             "Shell_TrayWnd",
             "Shell_SecondaryTrayWnd",
             "TopLevelWindowForOverflowXamlIsland",
+            "XamlExplorerHostIslandWindow",
+            "ControlCenterWindow",
+            "ForegroundStaging",
         ] {
             assert!(is_ignored_class(class));
         }
+        // The CoreWindow class is shared with real apps: the exe decides.
         assert!(!is_ignored_class("Chrome_WidgetWin_1"));
+        assert!(!is_ignored_class("Windows.UI.Core.CoreWindow"));
+    }
+
+    #[test]
+    fn shell_flyout_hosts_are_ignored_even_through_the_shared_class() {
+        let mut ring = VecDeque::new();
+        push_entry(&mut ring, entry(1, 1));
+        push_entry(&mut ring, entry(2, 3)); // Search flyout behind CoreWindow
+        push_entry(&mut ring, entry(3, 5)); // Notification Center ditto
+        let picked = pick(&ring, &[], |hwnd| hwnd != 0, exe_of).unwrap();
+        assert_eq!(picked.pid, 1);
     }
 }
