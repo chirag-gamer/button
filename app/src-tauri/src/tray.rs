@@ -224,9 +224,6 @@ pub fn show_dropdown(
             place_at(&window, click_rect(&rect));
         }
     }
-    // Temporary (task 3.0): dump the foreground census so the owner can
-    // tell us which shell popups to ignore (Start, Search, ...).
-    crate::front::dump_census();
     let _ = window.show();
     let _ = window.set_focus();
     Ok(())

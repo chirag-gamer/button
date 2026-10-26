@@ -27,8 +27,6 @@ pub struct FrontApp {
 }
 
 const RING_CAP: usize = 8;
-const CENSUS_CAP: usize = 64;
-
 #[derive(Debug)]
 struct Entry {
     hwnd: isize,
@@ -38,15 +36,10 @@ struct Entry {
 #[derive(Debug, Default)]
 struct State {
     ring: VecDeque<Entry>,
-    // Temporary (task 3.0): every foreground (class, pid) pair, deduped, so
-    // the owner can tell us which shell popups to ignore. The exe is
-    // resolved at dump time, keeping the hook callback cheap.
-    census: Vec<(String, u32)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
     ring: VecDeque::new(),
-    census: Vec::new(),
 });
 
 // HWINEVENTHOOK is not Sync, so the raw handle is stored as an isize
@@ -124,25 +117,6 @@ pub(crate) fn backdrop_event_ok(hwnd: isize) -> bool {
     matches!(exe_of_pid(pid), Some(exe) if !is_ignored_exe(&exe))
 }
 
-/// Temporary (task 3.0): log and clear the foreground census so the owner
-/// can tell us which shell popup class+exe pairs to ignore. Removed once
-/// the ignore list is settled.
-///
-/// The exe is best-effort: the callback records only the cheap (class, pid)
-/// pair, so the exe is resolved here at dump time. A process that exited
-/// since its event logs as unavailable; a recycled pid can mislabel a row.
-/// Acceptable for a temporary diagnostic — the shell popups this census
-/// hunts stay alive through a pass, and every dump re-collects fresh.
-pub fn dump_census() {
-    let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    for (class, pid) in state.census.drain(..) {
-        match exe_of_pid(pid) {
-            Some(exe) => log::info!("foreground census: class={class} exe={exe}"),
-            None => log::info!("foreground census: class={class} pid={pid} (exe unavailable)"),
-        }
-    }
-}
-
 unsafe extern "system" fn fg_cb(
     _hook: HWINEVENTHOOK,
     _event: u32,
@@ -168,20 +142,16 @@ fn record(hwnd: HWND) {
     if pid == 0 || pid == std::process::id() {
         return;
     }
-    if let Ok(mut state) = STATE.try_lock() {
-        let known = state.census.iter().any(|(c, p)| c == &class && p == &pid);
-        if !known && state.census.len() < CENSUS_CAP {
-            state.census.push((class.clone(), pid));
-        }
-        if !is_ignored_class(&class) {
-            push_entry(
-                &mut state.ring,
-                Entry {
-                    hwnd: hwnd.0 as isize,
-                    pid,
-                },
-            );
-        }
+    if let Ok(mut state) = STATE.try_lock()
+        && !is_ignored_class(&class)
+    {
+        push_entry(
+            &mut state.ring,
+            Entry {
+                hwnd: hwnd.0 as isize,
+                pid,
+            },
+        );
     }
 }
 
