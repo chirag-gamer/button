@@ -224,6 +224,9 @@ pub fn show_dropdown(
             place_at(&window, click_rect(&rect));
         }
     }
+    // Temporary (task 3.0): dump the foreground census so the owner can
+    // tell us which shell popups to ignore (Start, Search, ...).
+    crate::front::dump_census();
     let _ = window.show();
     let _ = window.set_focus();
     Ok(())
@@ -285,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_registry_has_two_persistent_fakes_and_keep_awake() {
+    fn test_registry_has_two_persistent_fakes_and_keep_awake() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -298,8 +301,9 @@ mod tests {
                 SwitchId::KeepAwake
             ]
         );
-        // D-063: desktop icons and taskbar persist across restarts via their
-        // fake state file; keep-awake is memory-only.
+        // D-067: the test-only registry keeps the D-063 split — desktop
+        // icons and taskbar persist via their fake state file, keep-awake
+        // is memory-only. Production registers real switches as 3.1+ lands.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())

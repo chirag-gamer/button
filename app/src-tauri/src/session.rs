@@ -109,6 +109,7 @@ impl SessionEngine {
         &mut self,
         now: OffsetDateTime,
         selected: &[SwitchId],
+        ctx: &Ctx,
     ) -> Result<&SessionState, SessionError> {
         if self.session.status != SessionStatus::Idle {
             return Err(SessionError::AlreadyActive);
@@ -124,7 +125,6 @@ impl SessionEngine {
         let journal = self
             .journal
             .get_or_insert_with(|| Journal::new(&self.app_version, now));
-        let ctx = Ctx::default();
 
         for id in RECORDING_ORDER {
             if !selected.contains(&id) {
@@ -160,7 +160,7 @@ impl SessionEngine {
                     continue;
                 }
             };
-            let after = switch.target_on(&before, &ctx);
+            let after = switch.target_on(&before, ctx);
             if before == after {
                 continue; // already in that state, nothing to undo (spec 7.1.2)
             }
@@ -369,6 +369,10 @@ mod tests {
         datetime!(2026-10-26 12:00:05 UTC)
     }
 
+    fn ctx() -> Ctx {
+        Ctx::default()
+    }
+
     // Unique dir under the system temp dir (no tempfile crate, D-063 instruction).
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -441,7 +445,7 @@ mod tests {
     fn start_applies_in_fixed_order_and_journals() {
         let dir = test_dir("start");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         assert_eq!(rig.engine.state().status, SessionStatus::Active);
         assert_eq!(
             rig.engine.state().applied,
@@ -459,9 +463,9 @@ mod tests {
     fn start_twice_errors_already_active() {
         let dir = test_dir("twice");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         assert!(matches!(
-            rig.engine.start(now(), &IDS),
+            rig.engine.start(now(), &IDS, &ctx()),
             Err(SessionError::AlreadyActive)
         ));
     }
@@ -474,7 +478,7 @@ mod tests {
         assert!(states.iter().all(|s| !s.on && s.off_at.is_none()));
 
         // Starting Recording Mode turns every available fake on (FR-4).
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         let states = rig.engine.switch_states();
         assert!(states.iter().all(|s| s.on));
 
@@ -545,7 +549,7 @@ mod tests {
         let missing = dir.join("does-not-exist");
         let mut rig = build(&missing, |_| opts(None, Availability::Available));
         assert!(matches!(
-            rig.engine.start(now(), &IDS),
+            rig.engine.start(now(), &IDS, &ctx()),
             Err(SessionError::Io(_))
         ));
         assert_eq!(rig.engine.state().status, SessionStatus::Idle);
@@ -553,7 +557,7 @@ mod tests {
         assert!(matches!(journal::read(&missing), JournalRead::Missing));
         // The engine stays usable: a start into a working directory works.
         std::fs::create_dir_all(&missing).unwrap();
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         assert_eq!(rig.engine.state().status, SessionStatus::Active);
     }
 
@@ -561,7 +565,7 @@ mod tests {
     fn stop_restores_and_a_second_stop_is_rejected() {
         let dir = test_dir("stop");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         rig.engine.stop(later()).unwrap();
         assert_eq!(rig.engine.state().status, SessionStatus::Idle);
         assert!(all_off(&rig));
@@ -580,7 +584,7 @@ mod tests {
             o.fail_apply = i == 0;
             o
         });
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         assert_eq!(rig.engine.state().applied.len(), 2);
         assert_eq!(rig.engine.state().failed.len(), 1);
         assert_eq!(rig.engine.state().failed[0].id, SwitchId::DesktopIcons);
@@ -604,7 +608,7 @@ mod tests {
             o
         });
         rig.handles[0].set(true); // already on: nothing to undo
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         assert_eq!(rig.engine.state().applied, vec![SwitchId::KeepAwake]);
         assert_eq!(rig.engine.state().skipped.len(), 1);
         assert_eq!(rig.engine.state().skipped[0].reason, "needs-windows-11");
@@ -618,7 +622,7 @@ mod tests {
     fn user_reverted_values_are_left_alone() {
         let dir = test_dir("user-revert");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         rig.handles[1].set(false); // the user undid taskbar behind our back
         rig.engine.stop(later()).unwrap();
         assert!(!rig.handles[1].is_on());
@@ -633,7 +637,7 @@ mod tests {
     fn recovery_drops_non_persistent_and_restores_persistent() {
         let dir = test_dir("recovery");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        rig.engine.start(now(), &IDS).unwrap();
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
         drop(rig); // "crash": no restore ran
 
         let mut rig2 = build(&dir, |_| opts(None, Availability::Available));
@@ -701,7 +705,7 @@ mod tests {
                     // n beyond the fake's call count means no panic; every
                     // branch must end in the same clean state.
                     let _ = catch_unwind(AssertUnwindSafe(|| {
-                        rig.engine.start(now(), &IDS).unwrap();
+                        rig.engine.start(now(), &IDS, &ctx()).unwrap();
                     }));
                     drop(rig);
 
@@ -728,7 +732,7 @@ mod tests {
                 for n in 1..=4 {
                     let dir = test_dir(&format!("kill-restore-{after_mutation}-{fake_idx}-{n}"));
                     let mut rig = build(&dir, |_| opts(None, Availability::Available));
-                    rig.engine.start(now(), &IDS).unwrap();
+                    rig.engine.start(now(), &IDS, &ctx()).unwrap();
                     drop(rig);
 
                     // Recovery itself runs the restore; kill it mid-way.

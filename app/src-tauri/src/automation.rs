@@ -4,7 +4,8 @@
 use tauri::{AppHandle, Emitter, Manager};
 use time::OffsetDateTime;
 
-use crate::switches::{Availability, SwitchId};
+use crate::settings::Settings;
+use crate::switches::{Availability, Ctx, SwitchId};
 use crate::tray;
 use crate::{AppState, SessionStatus, SharedState};
 
@@ -106,6 +107,24 @@ pub fn after_change(app: &AppHandle) {
     let _ = app.emit("state-changed", app_state);
 }
 
+/// D-066: what one start needs, from settings plus the front tracker.
+fn build_ctx(settings: &Settings) -> Ctx {
+    Ctx {
+        front: crate::front::front(&settings.apps.stays_on_screen),
+        stays_on_screen: settings.apps.stays_on_screen.clone(),
+        tray_visible: settings.tray_icons.visible.clone(),
+        backdrop_color: settings.backdrop.color.clone(),
+        own_pid: std::process::id(),
+        own_exe: std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default(),
+    }
+}
+
 pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
     let state = app.state::<SharedState>();
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -113,11 +132,12 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
 
     let active = b.engine.state().status == SessionStatus::Active;
     let selected = b.settings.recording_mode.actions.clone();
+    let ctx = build_ctx(&b.settings);
     let mut started = false;
     let result: Result<(), String> = match action {
         Action::Start if !active => b
             .engine
-            .start(now, &selected)
+            .start(now, &selected, &ctx)
             .map(|_| started = true)
             .map_err(|e| e.to_string()),
         Action::Start => Err(session_active()),
@@ -126,7 +146,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
         Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
         Action::Toggle => b
             .engine
-            .start(now, &selected)
+            .start(now, &selected, &ctx)
             .map(|_| started = true)
             .map_err(|e| e.to_string()),
         Action::ShowDropdown { click } => {
@@ -137,7 +157,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
         Action::Switch { id, on } => {
             match b.engine.switch_availability(id) {
                 Some(Availability::Available) => {
-                    // Registered in this build (debug fakes); execution of
+                    // Registered in this build; execution of
                     // quick switches is Phase 4 (FR-27, FR-28).
                     notify(
                         app,
