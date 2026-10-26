@@ -33,15 +33,15 @@ const CENSUS_CAP: usize = 64;
 struct Entry {
     hwnd: isize,
     pid: u32,
-    exe: String,
 }
 
 #[derive(Debug, Default)]
 struct State {
     ring: VecDeque<Entry>,
-    // Temporary (task 3.0): every foreground (class, exe) pair, deduped, so
-    // the owner can tell us which shell popups to ignore.
-    census: Vec<(String, String)>,
+    // Temporary (task 3.0): every foreground (class, pid) pair, deduped, so
+    // the owner can tell us which shell popups to ignore. The exe is
+    // resolved at dump time, keeping the hook callback cheap.
+    census: Vec<(String, u32)>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
@@ -72,8 +72,10 @@ pub fn install() {
         log::warn!("foreground hook could not be installed; front stays empty");
     } else {
         HOOK.store(hook.0 as isize, Ordering::SeqCst);
+        // Seed the ring only when the hook works: without it nothing keeps
+        // the entry fresh and front() would hand out a stale app forever.
+        record(unsafe { GetForegroundWindow() });
     }
-    record(unsafe { GetForegroundWindow() });
 }
 
 pub fn unhook() {
@@ -83,15 +85,12 @@ pub fn unhook() {
     }
 }
 
-/// The newest foreground window that is still a valid window and not on
-/// Stays on Screen (spec 7.8, D-066).
+/// The newest foreground window that is still a valid window, whose process
+/// still resolves to an exe, and that is not on Stays on Screen (spec 7.8,
+/// D-066). The exe lookup runs here, once per start — never in the hook.
 pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
     let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    pick(&state.ring, stays_on_screen, is_window).map(|e| FrontApp {
-        hwnd: e.hwnd,
-        pid: e.pid,
-        exe: e.exe.clone(),
-    })
+    pick(&state.ring, stays_on_screen, is_window, exe_of_pid)
 }
 
 /// Temporary (task 3.0): log and clear the foreground census so the owner
@@ -99,8 +98,11 @@ pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
 /// the ignore list is settled.
 pub fn dump_census() {
     let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    for (class, exe) in state.census.drain(..) {
-        log::info!("foreground census: class={class} exe={exe}");
+    for (class, pid) in state.census.drain(..) {
+        match exe_of_pid(pid) {
+            Some(exe) => log::info!("foreground census: class={class} exe={exe}"),
+            None => log::info!("foreground census: class={class} pid={pid} (exe unavailable)"),
+        }
     }
 }
 
@@ -116,6 +118,8 @@ unsafe extern "system" fn fg_cb(
     record(hwnd);
 }
 
+/// Hook-callback side: cheap reads only (class name + pid). Opening the
+/// process to resolve its exe happens in `front()`, off the event path.
 fn record(hwnd: HWND) {
     if hwnd.is_invalid() {
         return;
@@ -126,13 +130,10 @@ fn record(hwnd: HWND) {
     if pid == 0 || pid == std::process::id() {
         return;
     }
-    let Some(exe) = exe_of_pid(pid) else {
-        return;
-    };
     if let Ok(mut state) = STATE.try_lock() {
-        let known = state.census.iter().any(|(c, e)| c == &class && e == &exe);
+        let known = state.census.iter().any(|(c, p)| c == &class && p == &pid);
         if !known && state.census.len() < CENSUS_CAP {
-            state.census.push((class.clone(), exe.clone()));
+            state.census.push((class.clone(), pid));
         }
         if !is_ignored_class(&class) {
             push_entry(
@@ -140,23 +141,34 @@ fn record(hwnd: HWND) {
                 Entry {
                     hwnd: hwnd.0 as isize,
                     pid,
-                    exe,
                 },
             );
         }
     }
 }
 
-fn pick<'a>(
-    ring: &'a VecDeque<Entry>,
+fn pick(
+    ring: &VecDeque<Entry>,
     stays_on_screen: &[String],
     valid: impl Fn(isize) -> bool,
-) -> Option<&'a Entry> {
-    ring.iter().rev().find(|e| {
-        valid(e.hwnd)
-            && !stays_on_screen
-                .iter()
-                .any(|s| crate::switches::same_exe(s, &e.exe))
+    exe_of: impl Fn(u32) -> Option<String>,
+) -> Option<FrontApp> {
+    ring.iter().rev().find_map(|e| {
+        if !valid(e.hwnd) {
+            return None;
+        }
+        let exe = exe_of(e.pid)?;
+        if stays_on_screen
+            .iter()
+            .any(|s| crate::switches::same_exe(s, &exe))
+        {
+            return None;
+        }
+        Some(FrontApp {
+            hwnd: e.hwnd,
+            pid: e.pid,
+            exe,
+        })
     })
 }
 
@@ -212,48 +224,63 @@ fn exe_of_pid(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn entry(hwnd: isize, exe: &str) -> Entry {
-        Entry {
-            hwnd,
-            pid: 1,
-            exe: exe.to_string(),
+    fn entry(hwnd: isize, pid: u32) -> Entry {
+        Entry { hwnd, pid }
+    }
+
+    /// Test exe resolver: pid 2 poses as OBS, pid 22 has exited.
+    fn exe_of(pid: u32) -> Option<String> {
+        match pid {
+            2 => Some("obs64.exe".to_string()),
+            22 => None,
+            _ => Some("app.exe".to_string()),
         }
     }
 
     #[test]
     fn picks_the_newest_valid_window_not_on_stays_on_screen() {
         let mut ring = VecDeque::new();
-        push_entry(&mut ring, entry(1, "explorer.exe"));
-        push_entry(&mut ring, entry(2, "obs64.exe")); // Stays on Screen
-        push_entry(&mut ring, entry(0, "code.exe")); // dead window
-        push_entry(&mut ring, entry(3, "chrome.exe"));
+        push_entry(&mut ring, entry(1, 1));
+        push_entry(&mut ring, entry(2, 2)); // Stays on Screen (obs64.exe)
+        push_entry(&mut ring, entry(0, 3)); // dead window
+        push_entry(&mut ring, entry(3, 4));
         let stays = ["obs64.exe".to_string()];
-        let picked = pick(&ring, &stays, |hwnd| hwnd != 0).unwrap();
-        assert_eq!(picked.exe, "chrome.exe");
+        let picked = pick(&ring, &stays, |hwnd| hwnd != 0, exe_of).unwrap();
+        assert_eq!(picked.pid, 4);
+        assert_eq!(picked.exe, "app.exe");
     }
 
     #[test]
     fn stays_on_screen_matches_case_insensitively() {
         let mut ring = VecDeque::new();
-        push_entry(&mut ring, entry(1, "obs64.exe"));
+        push_entry(&mut ring, entry(1, 2)); // resolves to obs64.exe
         let stays = ["OBS64.EXE".to_string()];
-        assert!(pick(&ring, &stays, |_| true).is_none());
+        assert!(pick(&ring, &stays, |_| true, exe_of).is_none());
     }
 
     #[test]
     fn empty_ring_or_no_valid_window_gives_none() {
         let ring: VecDeque<Entry> = VecDeque::new();
-        assert!(pick(&ring, &[], |_| true).is_none());
+        assert!(pick(&ring, &[], |_| true, exe_of).is_none());
         let mut ring = VecDeque::new();
-        push_entry(&mut ring, entry(0, "chrome.exe"));
-        assert!(pick(&ring, &[], |hwnd| hwnd != 0).is_none());
+        push_entry(&mut ring, entry(0, 1));
+        assert!(pick(&ring, &[], |hwnd| hwnd != 0, exe_of).is_none());
+    }
+
+    #[test]
+    fn an_entry_whose_process_no_longer_resolves_is_skipped() {
+        let mut ring = VecDeque::new();
+        push_entry(&mut ring, entry(1, 21));
+        push_entry(&mut ring, entry(2, 22)); // process gone since the event
+        let picked = pick(&ring, &[], |hwnd| hwnd != 0, exe_of).unwrap();
+        assert_eq!(picked.pid, 21);
     }
 
     #[test]
     fn the_ring_keeps_only_the_last_eight() {
         let mut ring = VecDeque::new();
         for hwnd in 0..12isize {
-            push_entry(&mut ring, entry(hwnd, "app.exe"));
+            push_entry(&mut ring, entry(hwnd, hwnd as u32));
         }
         assert_eq!(ring.len(), RING_CAP);
         assert_eq!(ring.front().unwrap().hwnd, 4); // oldest survivor
