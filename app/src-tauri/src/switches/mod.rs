@@ -12,6 +12,7 @@ pub mod fake;
 mod alert_sounds;
 mod desktop_icons;
 mod keep_awake;
+mod other_apps;
 mod taskbar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +43,7 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
     let mut switches: Vec<Box<dyn Switch>> = vec![
         Box::new(alert_sounds::AlertSounds),
         Box::new(desktop_icons::DesktopIcons),
+        Box::new(other_apps::OtherApps),
         Box::new(taskbar::Taskbar),
         Box::new(keep_awake::KeepAwake::new()),
     ];

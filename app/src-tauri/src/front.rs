@@ -226,7 +226,7 @@ fn class_of(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
-fn exe_of_pid(pid: u32) -> Option<String> {
+pub(crate) fn exe_of_pid(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
