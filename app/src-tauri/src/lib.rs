@@ -1,5 +1,7 @@
 mod automation;
+pub mod com;
 pub mod commands;
+mod front;
 mod hotkeys;
 pub mod journal;
 pub mod os;
@@ -262,6 +264,10 @@ pub fn run() {
             tray::update_tray(app.handle());
             tray::start_ticker(app.handle().clone());
 
+            // The foreground hook must be installed on the main thread: its
+            // events arrive on that thread's message pump (spec 2.3, 7.8).
+            front::install();
+
             // The dropdown lives next to the tray icon: frameless, always on
             // top, hidden until a tray click (spec 5.4 intro, 7.13). It is
             // content-protected so captures don't show it (D-032).
@@ -322,6 +328,7 @@ pub fn run() {
             // (Quit, sign-out, shutdown when Windows allows it).
             if let tauri::RunEvent::Exit = event {
                 automation::restore_on_exit(_app);
+                front::unhook();
             }
         });
 }

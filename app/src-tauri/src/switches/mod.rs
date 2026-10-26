@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::journal::JournalEntry;
 use crate::os::OsInfo;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 pub mod fake;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,32 +28,93 @@ pub enum SwitchId {
     Bluetooth,
 }
 
-/// The registered switches (spec 2.1). Release builds register none until
-/// Phase 3; debug builds register fakes (D-063) so the whole flow is
-/// demoable without touching Windows (D-033).
+/// The registered switches (spec 2.1). Real switches register here as their
+/// Phase 3 tasks land them, in debug and release alike; the list is empty
+/// until 3.1 (D-067). Tests get the fakes instead.
 pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
-    #[cfg(any(test, debug_assertions))]
-    {
-        vec![
-            Box::new(fake::FakeSwitch::persistent(
-                SwitchId::DesktopIcons,
-                data_dir.to_path_buf(),
-            )),
-            Box::new(fake::FakeSwitch::persistent(
-                SwitchId::Taskbar,
-                data_dir.to_path_buf(),
-            )),
-            Box::new(fake::FakeSwitch::new(
-                SwitchId::KeepAwake,
-                fake::FakeOptions::default(),
-            )),
-        ]
+    // data_dir comes back into use as the real switches land (3.1+).
+    let _ = data_dir;
+    let mut switches: Vec<Box<dyn Switch>> = Vec::new();
+    #[cfg(test)]
+    switches.extend(test_fakes(data_dir));
+    #[cfg(debug_assertions)]
+    if let Ok(fail_id) = std::env::var("BUTTON_FAIL") {
+        switches = switches
+            .into_iter()
+            .map(|s| {
+                if s.id().to_string() == fail_id {
+                    Box::new(FailOnApply { inner: s }) as Box<dyn Switch>
+                } else {
+                    s
+                }
+            })
+            .collect();
     }
-    #[cfg(not(any(test, debug_assertions)))]
-    {
-        let _ = data_dir;
-        Vec::new()
+    switches
+}
+
+/// Debug-only wrapper (D-067): with `BUTTON_FAIL=<id>` the named switch's
+/// apply fails so M-6 can be exercised on a normal debug build.
+#[cfg(debug_assertions)]
+struct FailOnApply {
+    inner: Box<dyn Switch>,
+}
+
+#[cfg(debug_assertions)]
+impl Switch for FailOnApply {
+    fn id(&self) -> SwitchId {
+        self.inner.id()
     }
+
+    fn experimental(&self) -> bool {
+        self.inner.experimental()
+    }
+
+    fn availability(&self, os: &OsInfo) -> Availability {
+        self.inner.availability(os)
+    }
+
+    fn persistent(&self) -> bool {
+        self.inner.persistent()
+    }
+
+    fn read(&self) -> Result<serde_json::Value, SwitchError> {
+        self.inner.read()
+    }
+
+    fn target_on(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
+        self.inner.target_on(before, ctx)
+    }
+
+    fn apply(&self, _value: &serde_json::Value) -> Result<(), SwitchError> {
+        Err(SwitchError::NotAvailable(format!(
+            "BUTTON_FAIL forced {} to fail",
+            self.id()
+        )))
+    }
+
+    fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
+        self.inner.restore(e)
+    }
+}
+
+/// The fakes, compiled for tests only (D-063 as updated by D-067).
+#[cfg(test)]
+fn test_fakes(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
+    vec![
+        Box::new(fake::FakeSwitch::persistent(
+            SwitchId::DesktopIcons,
+            data_dir.to_path_buf(),
+        )),
+        Box::new(fake::FakeSwitch::persistent(
+            SwitchId::Taskbar,
+            data_dir.to_path_buf(),
+        )),
+        Box::new(fake::FakeSwitch::new(
+            SwitchId::KeepAwake,
+            fake::FakeOptions::default(),
+        )),
+    ]
 }
 
 /// Recording Mode's fixed apply order (spec 7.1).
@@ -105,10 +166,17 @@ pub enum Availability {
     NotBuilt,
 }
 
-/// Per-switch context for `target_on` (front app, monitor choice).
-/// Filled in by Phase 3 tasks; empty on purpose until then.
+/// Per-start context for `target_on`, built by automation from settings and
+/// the front tracker (D-066). session.rs and the switches stay Tauri-free.
 #[derive(Debug, Clone, Default)]
-pub struct Ctx {}
+pub struct Ctx {
+    pub front: Option<crate::front::FrontApp>,
+    pub stays_on_screen: Vec<String>,
+    pub tray_visible: Vec<String>,
+    pub backdrop_color: String,
+    pub own_pid: u32,
+    pub own_exe: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SwitchError {
@@ -152,5 +220,85 @@ pub trait Switch: Send + Sync {
         } else {
             Ok(RestoreOutcome::UserChanged)
         }
+    }
+}
+
+/// Parses a switch state value into `T`; a wrong shape is `Invalid`, never a
+/// panic (task 3.0). Every switch impl parses its state through this helper.
+pub fn parse_state<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    what: &str,
+) -> Result<T, SwitchError> {
+    serde_json::from_value(value.clone()).map_err(|e| SwitchError::Invalid(format!("{what}: {e}")))
+}
+
+/// Exe names and full paths compare case-insensitively on Windows (task 3.0).
+pub(crate) fn same_exe(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::JournalOwner;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Shape {
+        visible: bool,
+    }
+
+    #[test]
+    fn parse_state_accepts_the_documented_shape() {
+        let state = parse_state::<Shape>(&serde_json::json!({ "visible": false }), "test");
+        assert!(!state.unwrap().visible);
+    }
+
+    #[test]
+    fn parse_state_reports_wrong_shapes_as_invalid() {
+        for wrong in [
+            serde_json::json!({ "visible": "yes" }),
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let err = parse_state::<Shape>(&wrong, "test").unwrap_err();
+            assert!(matches!(err, SwitchError::Invalid(_)));
+        }
+    }
+
+    #[test]
+    fn exe_names_compare_case_insensitively() {
+        assert!(same_exe("OBS64.EXE", "obs64.exe"));
+        assert!(!same_exe("obs64.exe", "obs.exe"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn fail_on_apply_wraps_apply_only() {
+        let wrapped = FailOnApply {
+            inner: Box::new(fake::FakeSwitch::new(
+                SwitchId::KeepAwake,
+                fake::FakeOptions::default(),
+            )),
+        };
+        assert!(wrapped.read().is_ok());
+        assert!(matches!(
+            wrapped.apply(&serde_json::json!(true)),
+            Err(SwitchError::NotAvailable(_))
+        ));
+        // restore stays delegated, so nothing else changes behaviour.
+        let entry = JournalEntry {
+            seq: 0,
+            owner: JournalOwner::Recording,
+            switch: SwitchId::KeepAwake,
+            before: serde_json::json!(false),
+            after: serde_json::json!(true),
+            persistent: false,
+            off_at: None,
+            at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert!(matches!(
+            wrapped.restore(&entry),
+            Ok(RestoreOutcome::UserChanged)
+        ));
     }
 }

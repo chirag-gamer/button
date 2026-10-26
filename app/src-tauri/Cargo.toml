@@ -30,9 +30,21 @@ time = { version = "0.3.55", features = ["serde", "serde-well-known", "formattin
 windows = { version = "0.62.2", features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_SystemInformation",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+windows-registry = "=0.6.1"
 
 [profile.release]
 codegen-units = 1
