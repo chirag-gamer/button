@@ -162,7 +162,7 @@ pub fn run() {
             match automation::parse(&cli_args) {
                 Ok(action) => {
                     if let Err(message) = automation::run(app, action) {
-                        automation::notify(app, &message);
+                        automation::notify(app, &message.to_string());
                     }
                 }
                 Err(message) => automation::notify(app, &message),
@@ -207,6 +207,8 @@ pub fn run() {
                 data_dir,
                 env!("CARGO_PKG_VERSION").to_string(),
             );
+            // The Bluetooth switch works on the chosen device from settings.
+            switches::bluetooth::set_chosen(settings.bluetooth.device_id.clone());
             // Crash recovery runs before the tray is ready (spec 7.3). A
             // failing recovery must not stop the app from booting: the
             // journal stays on disk for the next launch.
@@ -217,6 +219,13 @@ pub fn run() {
                     session::RecoveryReport::default()
                 }
             };
+            // Experimental switches probe read-only at startup (FR-35);
+            // failures disable them and land in the row cache.
+            engine.run_probes();
+            // The lock overlay and the delayed Bluetooth refresh need the
+            // app handle (same Shell-module pattern as the backdrop).
+            switches::lock_keyboard::set_app(app.handle().clone());
+            switches::bluetooth::set_app(app.handle().clone());
             let hotkey_binding = settings.hotkeys.recording_mode.clone();
 
             app.manage(std::sync::Mutex::new(crate::ButtonState {
@@ -230,7 +239,18 @@ pub fn run() {
                 os,
             }));
             // FR-6: notify what launch recovery restored, including what
-            // failed to restore.
+            // failed to restore (spec 7.3.2 also requires notifying about
+            // a quarantined corrupt journal, even when nothing was restored).
+            if recovery.corrupted {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("button")
+                    .body("The leftover journal was unreadable. It was saved as journal.corrupt-*.json and nothing was restored automatically.")
+                    .show();
+                log::error!("launch recovery: journal was corrupt and got quarantined");
+            }
             if !recovery.restored.is_empty()
                 || !recovery.timers_to_rearm.is_empty()
                 || !recovery.failed.is_empty()
@@ -310,7 +330,7 @@ pub fn run() {
                     // becomes the instance and runs the command. It stays
                     // resident so the session (or dropdown) survives.
                     if let Err(message) = automation::run(app.handle(), action) {
-                        automation::notify(app.handle(), &message);
+                        automation::notify(app.handle(), &message.to_string());
                     }
                 }
                 Err(error) => {
@@ -327,6 +347,11 @@ pub fn run() {
             crate::commands::start_recording,
             crate::commands::stop_recording,
             crate::commands::toggle_recording,
+            crate::commands::set_switch,
+            crate::commands::unlock_keyboard,
+            crate::commands::list_bt_devices,
+            crate::commands::set_bluetooth_device,
+            crate::commands::set_keep_awake_options,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

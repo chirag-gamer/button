@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>button</title>
+    <!-- Empty data icon: stops the webview's automatic /favicon.ico
+         request, which the asset resolver logs as an error. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/overlays/lock.css" />
+    <script type="module" src="/src/overlays/lock.ts" defer></script>
+  </head>
+  <body>
+    <main class="lock-panel">
+      <p>Keyboard locked.<br />Press Esc or click Unlock.</p>
+      <button id="unlock">Unlock</button>
+    </main>
+  </body>
+</html>

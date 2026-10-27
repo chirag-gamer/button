@@ -86,11 +86,20 @@ impl Switch for KeepAwake {
         Ok(serde_json::json!(state))
     }
 
-    fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value {
+    /// Recording Mode passes `keep_awake_display: true` (D-069); manual use
+    /// passes `!settings.keepAwake.allowDisplayOff` (D-081).
+    fn target_on(&self, _before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
         serde_json::json!(State {
             on: true,
-            display: true
+            display: ctx.keep_awake_display,
         })
+    }
+
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State {
+            on: false,
+            display: false,
+        }))
     }
 
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
@@ -190,19 +199,58 @@ mod tests {
     }
 
     #[test]
-    fn target_on_is_system_and_display() {
-        let after = KeepAwake::new().target_on(
-            &serde_json::json!(State {
-                on: false,
-                display: false
-            }),
-            &Ctx::default(),
-        );
+    fn target_on_follows_the_ctx_display_flag() {
+        let mut ctx = Ctx {
+            keep_awake_display: true, // Recording Mode (D-069)
+            ..Ctx::default()
+        };
         assert_eq!(
-            after,
+            KeepAwake::new().target_on(
+                &serde_json::json!(State {
+                    on: false,
+                    display: false
+                }),
+                &ctx
+            ),
             serde_json::json!(State {
                 on: true,
                 display: true
+            })
+        );
+        ctx = Ctx {
+            keep_awake_display: false, // "Let the screen turn off" (D-081)
+            ..Ctx::default()
+        };
+        assert_eq!(
+            KeepAwake::new().target_on(
+                &serde_json::json!(State {
+                    on: false,
+                    display: false
+                }),
+                &ctx
+            ),
+            serde_json::json!(State {
+                on: true,
+                display: false
+            })
+        );
+    }
+
+    #[test]
+    fn target_off_clears_the_request() {
+        assert_eq!(
+            KeepAwake::new()
+                .target_off(
+                    &serde_json::json!(State {
+                        on: true,
+                        display: true
+                    }),
+                    &Ctx::default()
+                )
+                .unwrap(),
+            serde_json::json!(State {
+                on: false,
+                display: false
             })
         );
     }

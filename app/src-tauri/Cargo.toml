@@ -24,27 +24,42 @@ log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-time = { version = "0.3.55", features = ["serde", "serde-well-known", "formatting", "parsing"] }
+time = { version = "0.3.55", features = ["serde", "serde-well-known", "formatting", "parsing", "local-offset"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Wdk_System_SystemServices",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_KernelStreaming",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Power",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Direct dep (D-077): the #[windows_core::interface] macro in dnd.rs emits
+# ::windows_core paths, so the crate must be nameable here. Already in the
+# lockfile as a transitive dep of `windows`.
+windows-core = "=0.62.2"
 windows-registry = "=0.6.1"
+# Night Light CloudStore blob codec (D-077). Adds windows-registry/result
+# 0.100 as duplicate crates.
+win-nightlight-lib = "=0.5.0"
 
 [profile.release]
 codegen-units = 1

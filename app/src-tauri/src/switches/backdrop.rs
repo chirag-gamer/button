@@ -42,6 +42,10 @@ impl Switch for Backdrop {
         serde_json::json!(State { shown: true })
     }
 
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State { shown: false }))
+    }
+
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "backdrop")?;
         if target.shown {
@@ -87,6 +91,12 @@ mod tests {
         let ctx = Ctx::default();
         let target = Backdrop.target_on(&serde_json::json!({ "shown": false }), &ctx);
         assert_eq!(target, serde_json::json!({ "shown": true }));
+    }
+
+    #[test]
+    fn target_off_hides() {
+        let off = Backdrop.target_off(&serde_json::json!({ "shown": true }), &Ctx::default());
+        assert_eq!(off, Some(serde_json::json!({ "shown": false })));
     }
 
     #[test]

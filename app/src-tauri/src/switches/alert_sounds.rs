@@ -65,6 +65,10 @@ impl Switch for AlertSounds {
         serde_json::json!(State { muted: true })
     }
 
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State { muted: false }))
+    }
+
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "alert sounds")?;
         let _guard = ComGuard::new()?;
@@ -184,6 +188,13 @@ mod tests {
         let after =
             AlertSounds.target_on(&serde_json::json!(State { muted: false }), &Ctx::default());
         assert_eq!(after, serde_json::json!(State { muted: true }));
+    }
+
+    #[test]
+    fn target_off_is_unmuted() {
+        let off =
+            AlertSounds.target_off(&serde_json::json!(State { muted: true }), &Ctx::default());
+        assert_eq!(off, Some(serde_json::json!(State { muted: false })));
     }
 
     /// Read-only live probe: GetMute changes nothing. A machine without a

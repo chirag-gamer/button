@@ -44,7 +44,7 @@
 
 - **Tests:** after each task, run **only the tests for the files you edited**. At the end of a phase and before any push, run the full suite ([D-029](decisions.md), [D-056](decisions.md)).
 - **Every report must list:** tests run + results; **new tests needed** (add them as a task in plan.md if not written now); **human verification steps** (exact clicks or commands, expected result, how to undo), especially for switches.
-- **Commits:** Conventional Commits, one per task: `git commit -m "<type>: ..." -m "- ..." -m "Implements N.M (FR-#)"`. Push only at phase end with the owner's OK ([D-056](decisions.md)). Docs are updated in the same task (plan.md sync rules). Decisions are logged right away.
+- **Commits:** one commit per phase PR, squash-merged as `<type>: <phase summary> — <what changed> (tasks N.M–N.M)`; task-level detail lives in plan.md and the PR description, and review fixes land as extra commits on the phase branch ([D-056](decisions.md) as amended by [D-083](decisions.md); PR flow per [D-062](decisions.md)). Docs are updated in the same task (plan.md sync rules). Decisions are logged right away.
 - **Done means:** the cited FR acceptance criteria are met, tests for the edited files are green, the docs are in sync, the task is ticked in plan.md as `- [x] N.M: ... — **DONE <date>**: ...`, and the STATUS report has been sent.
 - **Stop and ask when:** a task contradicts spec.md or prd.md, an API behaves differently from spec.md, a test fails (kickoff §8.4), or you hit something UNRESOLVED.
 - **Roles:** the owner approves every gate. The AI assistant drafts, codes and runs checks, and never approves its own work. There's a single agent, so handoff = the STATUS report + an up-to-date plan.md.

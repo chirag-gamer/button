@@ -36,7 +36,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "start-restore" => {
                 if let Err(message) = automation::run(app, Action::Toggle) {
-                    automation::notify(app, &message);
+                    automation::notify(app, &message.to_string());
                 }
             }
             "quit" => app.exit(0),
@@ -66,7 +66,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                 ..
             } => {
                 if let Err(message) = automation::run(tray.app_handle(), Action::Toggle) {
-                    automation::notify(tray.app_handle(), &message);
+                    automation::notify(tray.app_handle(), &message.to_string());
                 }
             }
             _ => {}
@@ -132,17 +132,28 @@ pub fn format_elapsed(total_seconds: i64) -> String {
 }
 
 /// The 1 s ticker: a plain std::thread with a 1 s sleep (no tokio dep). It
-/// only works while a session is active (spec 7.7, 10); timers fire here
-/// from Phase 4 on.
+/// only works while a session is active or a timer is pending (spec 7.7,
+/// §10); timers fire here (FR-28). The emit uses the engine's row cache,
+/// so the ticker itself never reads a switch.
 pub fn start_ticker(app: AppHandle) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let state = app.state::<SharedState>();
-            let b = state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
             let active = b.engine.state().status == SessionStatus::Active;
+            let timers = b.engine.has_timers();
+            if active || timers {
+                // fire_due_timers runs OS restores under the SharedState
+                // lock: a slow restore (Bluetooth KsProperty) briefly
+                // blocks IPC/tray. Deliberate: start/stop/set_switch hold
+                // the same lock across their OS work, and the per-entry
+                // restore+journal-write interleaving (spec 7.2) assumes the
+                // engine is locked. Latency-only, no correctness impact.
+                b.engine.fire_due_timers(time::OffsetDateTime::now_utc());
+            }
             drop(b);
-            if active {
+            if active || timers {
                 automation::after_change(&app);
             }
         }
@@ -212,6 +223,10 @@ pub fn show_dropdown(
         let _ = window.hide();
         return Ok(());
     }
+    // The list must be current the moment it shows (FR-27): refresh the row
+    // cache AND push it — the dropdown window is long-lived, so its page
+    // only updates on state-changed.
+    automation::refresh_switches(app);
     if let Some(click) = click {
         place_at(&window, click);
     } else {
@@ -285,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_the_seven_phase3_switches() {
+    fn test_registry_has_every_switch() {
         let dir = std::env::temp_dir().join(format!("button-registry-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let registry = build_registry(&dir);
@@ -299,15 +314,24 @@ mod tests {
                 SwitchId::Backdrop,
                 SwitchId::Taskbar,
                 SwitchId::TrayIcons,
-                SwitchId::KeepAwake
+                SwitchId::KeepAwake,
+                SwitchId::DarkMode,
+                SwitchId::Dnd,
+                SwitchId::LockKeyboard,
+                SwitchId::Microphone,
+                SwitchId::NightLight,
+                SwitchId::ScreenSaver,
+                SwitchId::Bluetooth,
             ]
         );
         // Spec 7.3 persistence: every effect that outlives button's
         // process is restored by crash recovery — Explorer state
-        // (desktop icons, taskbar auto-hide, tray-icon promotion),
-        // minimized windows (other-apps) and audio-service mutes
-        // (alert-sounds). Process-owned state (keep-awake, backdrop
-        // windows) dies with the process and is dropped.
+        // (desktop icons, taskbar auto-hide, tray-icon promotion, dark
+        // mode, DND profile, Night Light blob, Bluetooth link), minimized
+        // windows (other-apps) and audio-service mutes (alert-sounds,
+        // microphone). Process-owned state (keep-awake power request,
+        // backdrop and lock windows) dies with the process and is dropped.
+        // Screen-saver is an action and never journaled.
         let persistent: Vec<SwitchId> = registry
             .iter()
             .filter(|s| s.persistent())
@@ -320,8 +344,29 @@ mod tests {
                 SwitchId::DesktopIcons,
                 SwitchId::OtherApps,
                 SwitchId::Taskbar,
-                SwitchId::TrayIcons
+                SwitchId::TrayIcons,
+                SwitchId::DarkMode,
+                SwitchId::Dnd,
+                SwitchId::Microphone,
+                SwitchId::NightLight,
+                SwitchId::Bluetooth,
             ]
         );
+        let experimental: Vec<SwitchId> = registry
+            .iter()
+            .filter(|s| s.experimental())
+            .map(|s| s.id())
+            .collect();
+        assert_eq!(
+            experimental,
+            vec![SwitchId::Dnd, SwitchId::NightLight, SwitchId::Bluetooth],
+            "D-013/D-014: the undocumented trio"
+        );
+        let actions: Vec<SwitchId> = registry
+            .iter()
+            .filter(|s| s.is_action())
+            .map(|s| s.id())
+            .collect();
+        assert_eq!(actions, vec![SwitchId::ScreenSaver]);
     }
 }

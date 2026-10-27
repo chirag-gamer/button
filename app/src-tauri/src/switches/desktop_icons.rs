@@ -52,6 +52,10 @@ impl Switch for DesktopIcons {
         serde_json::json!(State { visible: false })
     }
 
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State { visible: true }))
+    }
+
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "desktop icons")?;
         let defview = defview()

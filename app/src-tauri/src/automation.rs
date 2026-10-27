@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use time::OffsetDateTime;
 
 use crate::settings::Settings;
-use crate::switches::{Availability, Ctx, SwitchId};
+use crate::switches::{Ctx, SwitchId};
 use crate::tray;
 use crate::{AppState, SessionStatus, SharedState};
 
@@ -21,8 +21,8 @@ pub enum Action {
     ShowDropdown {
         click: Option<crate::position::ClickRect>,
     },
-    /// `button.exe switch <id> on|off|toggle`. Quick switches arrive in
-    /// Phase 4; until then every switch reports NotBuilt (FR-27, FR-28).
+    /// `button.exe switch <id> on|off|toggle`: one quick switch through the
+    /// same engine path as the dropdown (FR-27, spec 6.3).
     Switch {
         id: SwitchId,
         on: SwitchOnOff,
@@ -108,6 +108,7 @@ pub fn after_change(app: &AppHandle) {
 }
 
 /// D-066: what one start needs, from settings plus the front tracker.
+/// Recording Mode always keeps the display awake (D-069).
 fn build_ctx(settings: &Settings) -> Ctx {
     Ctx {
         front: crate::front::front(&settings.apps.stays_on_screen),
@@ -122,76 +123,118 @@ fn build_ctx(settings: &Settings) -> Ctx {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .unwrap_or_default(),
+        keep_awake_display: true,
     }
 }
 
-pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
+/// What a manual `set_switch` needs: the standalone Keep Awake obeys the
+/// "Let the screen turn off" option (D-081).
+pub fn manual_ctx(settings: &Settings) -> Ctx {
+    Ctx {
+        keep_awake_display: !settings.keep_awake.allow_display_off,
+        ..build_ctx(settings)
+    }
+}
+
+/// Re-read every switch row and push the fresh state to the UI (dropdown
+/// show, delayed Bluetooth refresh, keyboard unlock — task 4.2's refresh
+/// points outside the engine).
+#[cfg_attr(test, allow(dead_code))] // every caller is cfg(not(test)) (D-074)
+pub fn refresh_switches(app: &AppHandle) {
     let state = app.state::<SharedState>();
+    let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
+    b.engine.refresh_rows();
+    drop(b);
+    after_change(app);
+}
+
+/// Dispatcher failures; commands.rs maps these onto the spec 6.1 codes
+/// (replaces matching the error prose by string, which drifted silently
+/// into NOT_AVAILABLE on any wording change).
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError {
+    #[error("A session is already active")]
+    SessionActive,
+    #[error("No session is active")]
+    NoSession,
+    #[error("{0}")]
+    Failed(String),
+}
+
+fn dispatch_err(e: crate::session::SessionError) -> DispatchError {
+    match e {
+        crate::session::SessionError::AlreadyActive => DispatchError::SessionActive,
+        crate::session::SessionError::NotActive => DispatchError::NoSession,
+        crate::session::SessionError::Io(e) => DispatchError::Failed(e.to_string()),
+        crate::session::SessionError::JournalBlocked => {
+            DispatchError::Failed(crate::session::SessionError::JournalBlocked.to_string())
+        }
+    }
+}
+
+pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
+    // The single-instance callback can arrive during setup, before
+    // ButtonState is managed (registry build + recovery + probes take a
+    // moment; every other caller exists only after setup). Refuse instead
+    // of panicking on the missing state.
+    let Some(state) = app.try_state::<SharedState>() else {
+        let message = "button is still starting; try again in a moment";
+        log::warn!("dispatcher dropped {action:?}: {message}");
+        return Err(DispatchError::Failed(message.into()));
+    };
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
     let now = OffsetDateTime::now_utc();
 
     let active = b.engine.state().status == SessionStatus::Active;
     let selected = b.settings.recording_mode.actions.clone();
     let mut started = false;
-    let result: Result<(), String> = match action {
+    let result: Result<(), DispatchError> = match action {
         Action::Start if !active => {
             let ctx = build_ctx(&b.settings);
             b.engine
                 .start(now, &selected, &ctx)
                 .map(|_| started = true)
-                .map_err(|e| e.to_string())
+                .map_err(dispatch_err)
         }
-        Action::Start => Err(session_active()),
-        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Stop => Err(no_session()),
-        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
+        Action::Start => Err(DispatchError::SessionActive),
+        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
+        Action::Stop => Err(DispatchError::NoSession),
+        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
         Action::Toggle => {
             let ctx = build_ctx(&b.settings);
             b.engine
                 .start(now, &selected, &ctx)
                 .map(|_| started = true)
-                .map_err(|e| e.to_string())
+                .map_err(dispatch_err)
         }
         Action::ShowDropdown { click } => {
             drop(b);
-            tray::show_dropdown(app, click)?;
+            tray::show_dropdown(app, click).map_err(DispatchError::Failed)?;
             return Ok(());
         }
         Action::Switch { id, on } => {
-            match b.engine.switch_availability(id) {
-                Some(Availability::Available) => {
-                    // Registered in this build; execution of
-                    // quick switches is Phase 4 (FR-27, FR-28).
-                    notify(
-                        app,
-                        &format!("{id} {on:?}: quick switches arrive in Phase 4"),
-                    );
-                }
-                _ => notify(app, &format!("{id}: not available in this build")),
-            }
-            drop(b);
-            return Ok(());
+            let ctx = manual_ctx(&b.settings);
+            let resolved = match on {
+                SwitchOnOff::On => true,
+                SwitchOnOff::Off => false,
+                SwitchOnOff::Toggle => !b.engine.is_switch_on(id),
+            };
+            b.engine
+                .set_switch(id, resolved, None, now, &ctx)
+                .map_err(|e| DispatchError::Failed(e.to_string()))
         }
         Action::Restore => {
-            // While a session is active the journal belongs to it: stop
-            // instead of running crash recovery, which would drop its
-            // non-persistent entries (spec 7.3 vs 7.2).
-            let summary = if active {
-                match b.engine.stop(now) {
-                    Ok(_) => "Recording Mode ended".to_string(),
-                    Err(e) => format!("Restore failed: {e}"),
-                }
-            } else {
-                match b.engine.recover(now) {
-                    Ok(report) if report.failed.is_empty() => {
-                        "Journal restored (if anything was left)".to_string()
-                    }
-                    Ok(report) => format!(
-                        "Restore finished, but {} switch(es) could not be restored",
-                        report.failed.len()
-                    ),
-                    Err(e) => format!("Restore failed: {e}"),
-                }
+            // Stop the session if one is active, then restore every
+            // remaining journal entry, timers included. Never run launch
+            // recovery while the app runs: it would drop non-persistent
+            // entries like keep-awake (spec 7.3 vs 7.2, task 4.2).
+            let summary = match b.engine.restore_all_now(now) {
+                Ok(0) if active => "Recording Mode ended".to_string(),
+                Ok(0) => "Everything button still owned was restored".to_string(),
+                Ok(failed) => format!(
+                    "Restored everything else, but {failed} switch(es) could not be restored"
+                ),
+                Err(e) => format!("Restore failed: {e}"),
             };
             notify(app, &summary);
             drop(b);
@@ -209,27 +252,25 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
         tray::hide_dropdown(app);
     }
     // Summary when the last run left failures behind (apply or restore,
-    // spec 7.1.4 / 7.2).
-    let state = app.state::<SharedState>();
-    let b = state.lock().unwrap_or_else(|p| p.into_inner());
-    let failed = b.engine.state().failed.len();
-    let idle = b.engine.state().status == SessionStatus::Idle;
-    drop(b);
-    if idle && failed > 0 {
-        notify(
-            app,
-            &format!("{failed} switch(es) failed during the last run"),
-        );
+    // spec 7.1.4 / 7.2). Only the session actions own this summary; a quick
+    // switch must not re-announce an old session's failures.
+    if matches!(
+        action,
+        Action::Start | Action::Stop | Action::Toggle | Action::Restore
+    ) {
+        let state = app.state::<SharedState>();
+        let b = state.lock().unwrap_or_else(|p| p.into_inner());
+        let failed = b.engine.state().failed.len();
+        let idle = b.engine.state().status == SessionStatus::Idle;
+        drop(b);
+        if idle && failed > 0 {
+            notify(
+                app,
+                &format!("{failed} switch(es) failed during the last run"),
+            );
+        }
     }
     Ok(())
-}
-
-fn session_active() -> String {
-    "A session is already active".into()
-}
-
-fn no_session() -> String {
-    "No session is active".into()
 }
 
 /// Failures and CLI results go to a notification (spec 6.3: button has no

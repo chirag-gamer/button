@@ -126,3 +126,164 @@ button.link {
   border: none;
   cursor: pointer;
 }
+
+/* Quick switches (FR-27, FR-28) and their menus (task 4.1/4.2). */
+
+.summary {
+  margin: -2px 0 0 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.row {
+  position: relative; /* anchors the popover menu */
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.row.unavailable {
+  cursor: default;
+}
+
+.row .more-btn {
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.row .more-btn:hover {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.row .chips {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.row .chip {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.row .chip:hover {
+  border-color: var(--accent);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  right: 6px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
+}
+
+.menu button {
+  padding: 6px 10px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--fg);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu button:hover,
+.menu button.current {
+  background: var(--surface);
+}
+
+.menu button.current {
+  font-weight: 600;
+}
+
+.menu-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.menu-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* "Show all" must not overflow the fixed 320x440 window: the panel
+   scrolls, and low rows flip their popover upward. */
+
+.panel {
+  max-height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.menu.up {
+  top: auto;
+  bottom: calc(100% - 2px);
+}
+
+/* The state dot and the screen-saver Start badge are real buttons (the
+   row's role=group must not fold them away): reset their agent styles and
+   give them a focus ring and a padded hit area. */
+
+/* border:0 stays on the dot only: the Start badge keeps the shared
+   .row .badge border (a later border:0 at equal-or-higher specificity
+   stripped it). */
+.row .state {
+  border: 0;
+  padding: 6px;
+  margin: -6px;
+  cursor: pointer;
+}
+
+.row .badge.start {
+  cursor: pointer;
+}
+
+/* The dot keeps its own fill from .row .state / .row .state.on above; only
+   the badge needs the transparent button reset. */
+.row .badge.start {
+  margin: 0;
+  padding: 1px 5px;
+  background: none;
+}
+
+.row .state:disabled,
+.row .badge.start:disabled {
+  cursor: default;
+}
+
+.row .state:focus-visible,
+.row .badge.start:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+
+.row .badge.start:focus-visible {
+  border-radius: 4px;
+}

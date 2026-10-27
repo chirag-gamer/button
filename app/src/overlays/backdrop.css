@@ -1,0 +1,11 @@
+/* Backdrop styles (FR-20, spec 7.9), linked from backdrop.html so the CSP
+   needs no 'unsafe-inline' for styles (D-082). The colour comes from the
+   window layer (background_color at creation); the page itself stays
+   transparent so it shows through. Nothing interactive lives here. */
+html,
+body {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
