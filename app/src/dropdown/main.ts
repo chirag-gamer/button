@@ -232,10 +232,13 @@ function row(s: AppState["switches"][number]): HTMLElement {
     const start = document.createElement("button");
     start.className = "badge start";
     start.textContent = "Start";
+    start.setAttribute("aria-label", `Start ${LABELS[s.id]}`);
     if (actionable) {
       start.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void toggleRow(s);
+        e.stopPropagation(); // the row's click handler would double-fire
+        closeMenu(); // our stopPropagation hides this click from the
+        // document-level menu closer, and the render guard would freeze
+        void toggleRow(s); // the shelves while it believed a menu is open
       });
     } else {
       start.disabled = true;
@@ -247,14 +250,18 @@ function row(s: AppState["switches"][number]): HTMLElement {
     if (actionable) {
       dot.setAttribute("role", "switch");
       dot.setAttribute("aria-checked", String(s.on));
-      dot.setAttribute("aria-label", s.on ? "Turn off" : "Turn on");
+      // Name the entity, not the action: role+aria-checked carry the
+      // state ("Dark Mode, switch, checked"), and an action label loses
+      // the context entirely.
+      dot.setAttribute("aria-label", LABELS[s.id]);
       dot.addEventListener("click", (e) => {
         e.stopPropagation(); // the row's click handler would double-fire
+        closeMenu(); // see the Start badge above
         void toggleRow(s);
       });
     } else {
       dot.disabled = true;
-      dot.setAttribute("aria-label", "Unavailable");
+      dot.setAttribute("aria-label", LABELS[s.id]);
     }
     rowEl.append(dot);
   }
@@ -289,6 +296,7 @@ function extendChips(s: AppState["switches"][number]): HTMLElement {
     button.textContent = chip.label;
     button.addEventListener("click", async (e) => {
       e.stopPropagation();
+      closeMenu(); // same render-guard hazard as the dot/Start clicks
       const from = s.offAt ? Date.parse(s.offAt) : Date.now();
       const at = new Date(from + chip.minutes * 60_000).toISOString();
       try {

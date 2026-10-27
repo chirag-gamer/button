@@ -65,7 +65,8 @@ pub enum JournalRead {
     /// The file exists but could not be read (e.g. locked by antivirus or
     /// a backup). Never quarantined: it may be a perfectly good journal —
     /// spec 7.3's quarantine path covers only "doesn't parse". The caller
-    /// skips recovery and leaves the file for the next launch.
+    /// skips recovery AND blocks journal-writing engine operations until
+    /// restart, so the unrecovered file is never overwritten or deleted.
     Io(std::io::Error),
 }
 

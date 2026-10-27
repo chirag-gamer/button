@@ -250,11 +250,17 @@ button.link {
    row's role=group must not fold them away): reset their agent styles and
    give them a focus ring and a padded hit area. */
 
-.row .state,
-.row .badge.start {
+/* border:0 stays on the dot only: the Start badge keeps the shared
+   .row .badge border (a later border:0 at equal-or-higher specificity
+   stripped it). */
+.row .state {
   border: 0;
   padding: 6px;
   margin: -6px;
+  cursor: pointer;
+}
+
+.row .badge.start {
   cursor: pointer;
 }
 

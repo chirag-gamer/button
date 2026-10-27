@@ -24,6 +24,11 @@ pub enum SessionError {
     AlreadyActive,
     #[error("no session is active")]
     NotActive,
+    /// Startup recovery found the journal but could not read it (locked,
+    /// permissions): journal-writing operations are refused until restart
+    /// so the unrecovered file is never overwritten or deleted.
+    #[error("the journal file could not be read; restart button to recover it")]
+    JournalBlocked,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -133,6 +138,10 @@ pub struct SessionEngine {
     /// Row cache (task 4.1): refreshed at the few points where switch state
     /// changes — never by the 1 s ticker.
     rows: Vec<SwitchState>,
+    /// Set when startup recovery found the journal but could not read it:
+    /// journal-writing operations are refused until restart so the
+    /// unrecovered file is never overwritten or deleted.
+    journal_blocked: bool,
 }
 
 impl SessionEngine {
@@ -152,6 +161,7 @@ impl SessionEngine {
             probe_failures: HashMap::new(),
             manual: HashMap::new(),
             rows: Vec::new(),
+            journal_blocked: false,
         }
     }
 
@@ -273,6 +283,9 @@ impl SessionEngine {
         ctx: &Ctx,
     ) -> Result<&SessionState, SessionError> {
         let begun = std::time::Instant::now();
+        if self.journal_blocked {
+            return Err(SessionError::JournalBlocked);
+        }
         if self.session.status != SessionStatus::Idle {
             return Err(SessionError::AlreadyActive);
         }
@@ -403,6 +416,11 @@ impl SessionEngine {
         now: OffsetDateTime,
         ctx: &Ctx,
     ) -> Result<(), SwitchError> {
+        if self.journal_blocked {
+            return Err(SwitchError::NotAvailable(
+                "the journal file could not be read; restart button to recover it".into(),
+            ));
+        }
         let deadline = match &off_after {
             Some(spec) => Some(parse_off_after(spec, now).map_err(SwitchError::Invalid)?),
             None => None,
@@ -805,6 +823,11 @@ impl SessionEngine {
     /// Returns how many restores failed; their entries stay in the journal
     /// for the next recovery.
     pub fn restore_all_now(&mut self, now: OffsetDateTime) -> Result<usize, SessionError> {
+        if self.journal_blocked {
+            // An empty in-memory journal would otherwise delete the
+            // unread file in the tail below.
+            return Err(SessionError::JournalBlocked);
+        }
         let mut failed = 0usize;
         if self.session.status == SessionStatus::Active {
             self.restore_all(now)?;
@@ -856,9 +879,12 @@ impl SessionEngine {
         match journal::read(&self.data_dir) {
             JournalRead::Missing => {}
             JournalRead::Io(e) => {
-                // Locked/unreadable, not corrupt (spec 7.3): skip recovery,
-                // leave the file for the next launch — the app layer's
-                // existing catch logs it and keeps booting.
+                // Locked/unreadable, not corrupt (spec 7.3): skip recovery
+                // and leave the file for the next launch — and refuse
+                // journal-writing operations until restart, or the first
+                // start()/set_switch/restore would write a fresh journal
+                // over (or delete) the unrecovered file.
+                self.journal_blocked = true;
                 return Err(SessionError::Io(e));
             }
             JournalRead::Corrupt => {
@@ -2091,6 +2117,39 @@ mod tests {
             .set_switch(SwitchId::Dnd, true, None, now(), &ctx())
             .unwrap_err();
         assert!(matches!(err, SwitchError::Invalid(_)));
+    }
+
+    #[test]
+    fn blocked_journal_refuses_writes_until_restart() {
+        // A journal.json that cannot be read (a directory) must block every
+        // journal-writing entry point until restart — an unguarded write
+        // would rename a fresh journal over the unrecovered file, and an
+        // unguarded restore would delete it.
+        let dir = test_dir("blocked-journal");
+        std::fs::create_dir_all(dir.join("journal.json")).unwrap();
+        let mut rig = build(&dir, |_| manual_opts());
+        assert!(rig.engine.recover(now()).is_err());
+        assert!(matches!(
+            rig.engine.start(now(), &IDS, &ctx()),
+            Err(SessionError::JournalBlocked)
+        ));
+        assert!(
+            rig.engine
+                .set_switch(
+                    SwitchId::Taskbar,
+                    true,
+                    Some(OffAfter::Preset("15m".into())),
+                    now(),
+                    &ctx(),
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            rig.engine.restore_all_now(now()),
+            Err(SessionError::JournalBlocked)
+        ));
+        // The unread journal is still on disk, untouched.
+        assert!(dir.join("journal.json").exists());
     }
 
     // ---- offAfter parsing (task 4.2) ----

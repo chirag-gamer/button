@@ -166,6 +166,9 @@ fn dispatch_err(e: crate::session::SessionError) -> DispatchError {
         crate::session::SessionError::AlreadyActive => DispatchError::SessionActive,
         crate::session::SessionError::NotActive => DispatchError::NoSession,
         crate::session::SessionError::Io(e) => DispatchError::Failed(e.to_string()),
+        crate::session::SessionError::JournalBlocked => {
+            DispatchError::Failed(crate::session::SessionError::JournalBlocked.to_string())
+        }
     }
 }
 
