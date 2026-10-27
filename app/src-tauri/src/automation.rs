@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use time::OffsetDateTime;
 
 use crate::settings::Settings;
-use crate::switches::{Availability, Ctx, SwitchId};
+use crate::switches::{Ctx, SwitchId};
 use crate::tray;
 use crate::{AppState, SessionStatus, SharedState};
 
@@ -108,6 +108,7 @@ pub fn after_change(app: &AppHandle) {
 }
 
 /// D-066: what one start needs, from settings plus the front tracker.
+/// Recording Mode always keeps the display awake (D-069).
 fn build_ctx(settings: &Settings) -> Ctx {
     Ctx {
         front: crate::front::front(&settings.apps.stays_on_screen),
@@ -122,7 +123,29 @@ fn build_ctx(settings: &Settings) -> Ctx {
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .unwrap_or_default(),
+        keep_awake_display: true,
     }
+}
+
+/// What a manual `set_switch` needs: the standalone Keep Awake obeys the
+/// "Let the screen turn off" option (D-081).
+pub fn manual_ctx(settings: &Settings) -> Ctx {
+    Ctx {
+        keep_awake_display: !settings.keep_awake.allow_display_off,
+        ..build_ctx(settings)
+    }
+}
+
+/// Re-read every switch row and push the fresh state to the UI (dropdown
+/// show, delayed Bluetooth refresh, keyboard unlock — task 4.2's refresh
+/// points outside the engine).
+#[cfg_attr(test, allow(dead_code))] // every caller is cfg(not(test)) (D-074)
+pub fn refresh_switches(app: &AppHandle) {
+    let state = app.state::<SharedState>();
+    let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
+    b.engine.refresh_rows();
+    drop(b);
+    after_change(app);
 }
 
 pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
@@ -158,40 +181,25 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
             return Ok(());
         }
         Action::Switch { id, on } => {
-            match b.engine.switch_availability(id) {
-                Some(Availability::Available) => {
-                    // Registered in this build; execution of
-                    // quick switches is Phase 4 (FR-27, FR-28).
-                    notify(
-                        app,
-                        &format!("{id} {on:?}: quick switches arrive in Phase 4"),
-                    );
-                }
-                _ => notify(app, &format!("{id}: not available in this build")),
-            }
-            drop(b);
-            return Ok(());
+            let ctx = manual_ctx(&b.settings);
+            let resolved = match on {
+                SwitchOnOff::On => true,
+                SwitchOnOff::Off => false,
+                SwitchOnOff::Toggle => !b.engine.is_switch_on(id),
+            };
+            b.engine
+                .set_switch(id, resolved, None, now, &ctx)
+                .map_err(|e| e.to_string())
         }
         Action::Restore => {
-            // While a session is active the journal belongs to it: stop
-            // instead of running crash recovery, which would drop its
-            // non-persistent entries (spec 7.3 vs 7.2).
-            let summary = if active {
-                match b.engine.stop(now) {
-                    Ok(_) => "Recording Mode ended".to_string(),
-                    Err(e) => format!("Restore failed: {e}"),
-                }
-            } else {
-                match b.engine.recover(now) {
-                    Ok(report) if report.failed.is_empty() => {
-                        "Journal restored (if anything was left)".to_string()
-                    }
-                    Ok(report) => format!(
-                        "Restore finished, but {} switch(es) could not be restored",
-                        report.failed.len()
-                    ),
-                    Err(e) => format!("Restore failed: {e}"),
-                }
+            // Stop the session if one is active, then restore every
+            // remaining journal entry, timers included. Never run launch
+            // recovery while the app runs: it would drop non-persistent
+            // entries like keep-awake (spec 7.3 vs 7.2, task 4.2).
+            let summary = match b.engine.restore_all_now(now) {
+                Ok(()) if active => "Recording Mode ended".to_string(),
+                Ok(()) => "Everything button still owned was restored".to_string(),
+                Err(e) => format!("Restore failed: {e}"),
             };
             notify(app, &summary);
             drop(b);

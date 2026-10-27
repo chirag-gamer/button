@@ -1,16 +1,22 @@
-//! Session engine: apply / restore / crash recovery (spec 7.1 to 7.3).
-//! No Tauri types in here: it takes the switch list, OS info and the data
-//! dir, which is what makes it unit-testable with fakes (D-033).
+//! Session engine: apply / restore / crash recovery (spec 7.1 to 7.3), the
+//! startup probes (spec 7.6, FR-35), quick-switch turns (FR-27) and
+//! off-timers (FR-28, spec 7.7). No Tauri types in here: it takes the switch
+//! list, OS info and the data dir, which is what makes it unit-testable
+//! with fakes (D-033).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::Deserialize;
 use serde::Serialize;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime, UtcOffset};
 
 use crate::journal::{self, Journal, JournalEntry, JournalOwner, JournalRead};
 use crate::os::OsInfo;
-use crate::switches::{Availability, Ctx, RECORDING_ORDER, RestoreOutcome, Switch, SwitchId};
-use crate::{SessionState, SessionStatus, SkippedSwitch};
+use crate::switches::{
+    Availability, Ctx, RECORDING_ORDER, RestoreOutcome, Switch, SwitchError, SwitchId,
+};
+use crate::{SessionState, SessionStatus, SkippedSwitch, SwitchState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -20,6 +26,15 @@ pub enum SessionError {
     NotActive,
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// A journal write failure surfaced through a SwitchError path (the engine's
+/// SwitchError has no Io variant).
+fn journal_write_err(e: std::io::Error) -> SwitchError {
+    SwitchError::Os {
+        api: "journal::write",
+        code: e.raw_os_error().unwrap_or(-1),
+    }
 }
 
 /// What launch-time recovery did (spec 7.3); the app layer turns this into
@@ -35,6 +50,72 @@ pub struct RecoveryReport {
     pub timers_to_rearm: Vec<JournalEntry>,
 }
 
+/// The `offAfter` argument of `set_switch` (spec 6.1, D-051): a preset
+/// string, a minute count, or an absolute RFC 3339 time.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum OffAfter {
+    Preset(String),
+    Minutes {
+        minutes: u32,
+    },
+    At {
+        #[serde(with = "time::serde::rfc3339")]
+        at: OffsetDateTime,
+    },
+}
+
+/// Parses `offAfter` into the absolute deadline (task 4.2). "tomorrow"
+/// means the next 08:00 local: chosen before 08:00 it is today's 08:00,
+/// at or after 08:00 it is the next day's (D-079). The local offset is
+/// recomputed at the deadline once, so a DST boundary between now and
+/// then still lands on 08:00 local.
+pub fn parse_off_after(spec: &OffAfter, now: OffsetDateTime) -> Result<OffsetDateTime, String> {
+    match spec {
+        OffAfter::Preset(p) => match p.as_str() {
+            "15m" => Ok(now + time::Duration::minutes(15)),
+            "1h" => Ok(now + time::Duration::hours(1)),
+            "4h" => Ok(now + time::Duration::hours(4)),
+            "tomorrow" => tomorrow_0800(now),
+            other => Err(format!("unknown offAfter preset '{other}'")),
+        },
+        OffAfter::Minutes { minutes } => {
+            if (1..=1440).contains(minutes) {
+                Ok(now + time::Duration::minutes(*minutes as i64))
+            } else {
+                Err(format!("minutes must be 1..=1440, got {minutes}"))
+            }
+        }
+        OffAfter::At { at } if *at > now => Ok(*at),
+        OffAfter::At { .. } => Err("offAfter.at must be in the future".into()),
+    }
+}
+
+fn tomorrow_0800(now: OffsetDateTime) -> Result<OffsetDateTime, String> {
+    let offset = UtcOffset::local_offset_at(now)
+        .map_err(|e| format!("could not determine the local time zone: {e}"))?;
+    let local = now.to_offset(offset);
+    // D-079: before 08:00 the next 08:00 is later today, else tomorrow's.
+    let date = next_0800_date(local.date(), local.time())?;
+    let eight = time::Time::from_hms(8, 0, 0).expect("08:00 is a valid time");
+    let naive = PrimitiveDateTime::new(date, eight).assume_offset(offset);
+    // One DST recompute: 08:00 wall clock could sit in a different offset.
+    let at_offset = UtcOffset::local_offset_at(naive).unwrap_or(offset);
+    Ok(PrimitiveDateTime::new(date, eight).assume_offset(at_offset))
+}
+
+/// The calendar date of the next 08:00 local (D-079): today while the local
+/// time is before 08:00, else the next day.
+fn next_0800_date(date: time::Date, local_time: time::Time) -> Result<time::Date, String> {
+    let eight = time::Time::from_hms(8, 0, 0).expect("08:00 is a valid time");
+    if local_time < eight {
+        Ok(date)
+    } else {
+        date.next_day()
+            .ok_or_else(|| "no tomorrow at the end of the calendar".to_string())
+    }
+}
+
 pub struct SessionEngine {
     switches: Vec<Box<dyn Switch>>,
     os: OsInfo,
@@ -42,6 +123,16 @@ pub struct SessionEngine {
     app_version: String,
     session: SessionState,
     journal: Option<Journal>,
+    /// Probe failures by switch id (FR-35): the switch is unavailable with
+    /// this reason until the app restarts.
+    probe_failures: HashMap<SwitchId, String>,
+    /// Manual on-turns without a timer, in memory only (D-030): (before,
+    /// after) so a later off, or a timer added while already on, knows what
+    /// to go back to.
+    manual: HashMap<SwitchId, (serde_json::Value, serde_json::Value)>,
+    /// Row cache (task 4.1): refreshed at the few points where switch state
+    /// changes — never by the 1 s ticker.
+    rows: Vec<SwitchState>,
 }
 
 impl SessionEngine {
@@ -58,6 +149,9 @@ impl SessionEngine {
             app_version,
             session: SessionState::idle(),
             journal: None,
+            probe_failures: HashMap::new(),
+            manual: HashMap::new(),
+            rows: Vec::new(),
         }
     }
 
@@ -65,40 +159,107 @@ impl SessionEngine {
         &self.session
     }
 
-    /// Availability of one registered switch, if present.
-    pub fn switch_availability(&self, id: SwitchId) -> Option<Availability> {
+    fn switch(&self, id: SwitchId) -> Option<&dyn Switch> {
         self.switches
             .iter()
             .find(|s| s.id() == id)
-            .map(|s| s.availability(&self.os))
+            .map(|s| s.as_ref())
     }
 
-    /// Per-switch rows for the UI (spec 5.4). Off-timers come from the
-    /// journal's timer entries; timers fire via the ticker (spec 7.7).
-    pub fn switch_states(&self) -> Vec<crate::SwitchState> {
-        self.switches
+    /// Availability including the probe outcome (FR-35): a failed probe
+    /// disables the switch for Recording Mode and the dropdown alike.
+    fn effective_availability(&self, id: SwitchId, os_availability: Availability) -> Availability {
+        if self.probe_failures.contains_key(&id) {
+            Availability::ProbeFailed
+        } else {
+            os_availability
+        }
+    }
+
+    /// The user-facing reason an unavailable switch carries (row detail and
+    /// skip reason): the probe message, else the availability name.
+    fn unavailability_reason(&self, id: SwitchId, availability: Availability) -> String {
+        match self.probe_failures.get(&id) {
+            Some(probe_reason) => probe_reason.clone(),
+            None => availability_reason(availability),
+        }
+    }
+
+    /// Availability of one registered switch, if present.
+    pub fn switch_availability(&self, id: SwitchId) -> Option<Availability> {
+        self.switch(id)
+            .map(|s| self.effective_availability(id, s.availability(&self.os)))
+    }
+
+    /// Runs the read-only startup probes of every experimental switch, once
+    /// (spec 7.6). Failures disable the switch with the reason.
+    pub fn run_probes(&mut self) {
+        let begun = std::time::Instant::now();
+        let failures: Vec<(SwitchId, String)> = self
+            .switches
             .iter()
-            .map(|s| {
-                let off_at = self
-                    .journal
-                    .as_ref()
-                    .and_then(|j| {
-                        j.entries
-                            .iter()
-                            .rev()
-                            .find(|e| e.owner == JournalOwner::Timer && e.switch == s.id())
-                    })
-                    .and_then(|e| e.off_at);
-                crate::SwitchState {
-                    id: s.id(),
-                    on: s.read().map(|v| s.is_on(&v)).unwrap_or(false),
-                    availability: s.availability(&self.os),
-                    experimental: s.experimental(),
-                    off_at,
-                    detail: None,
-                }
-            })
-            .collect()
+            .filter(|s| s.experimental())
+            .filter_map(|s| s.probe().err().map(|reason| (s.id(), reason)))
+            .collect();
+        let probed = self.switches.iter().filter(|s| s.experimental()).count();
+        for (id, reason) in &failures {
+            log::warn!("probe failed for {id}: {reason}");
+        }
+        log::info!(
+            "probes: {} experimental, {} failed in {} ms",
+            probed,
+            failures.len(),
+            begun.elapsed().as_millis()
+        );
+        self.probe_failures = failures.into_iter().collect();
+        self.refresh_rows();
+    }
+
+    /// Reads every switch once and rebuilds the row cache (task 4.1).
+    /// Called after every state-changing point — set_switch, start, stop,
+    /// a fired timer, the dropdown opening, the delayed Bluetooth refresh —
+    /// and never by the ticker.
+    pub fn refresh_rows(&mut self) {
+        let mut rows = Vec::with_capacity(self.switches.len());
+        for s in &self.switches {
+            let id = s.id();
+            let availability = self.effective_availability(id, s.availability(&self.os));
+            let on = s.read().map(|v| s.is_on(&v)).unwrap_or(false);
+            let off_at = self
+                .journal
+                .as_ref()
+                .and_then(|j| {
+                    j.entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.owner == JournalOwner::Timer && e.switch == id)
+                })
+                .and_then(|e| e.off_at);
+            rows.push(SwitchState {
+                id,
+                on,
+                availability,
+                experimental: s.experimental(),
+                off_at,
+                detail: match availability {
+                    Availability::ProbeFailed => self.probe_failures.get(&id).cloned(),
+                    Availability::NeedsWindows11 => Some("Needs Windows 11".into()),
+                    _ => None,
+                },
+            });
+        }
+        self.rows = rows;
+    }
+
+    /// Per-switch rows for the UI (spec 5.4) — the cache built by
+    /// `refresh_rows`, so the ticker's once-a-second emit does no reads.
+    pub fn switch_states(&self) -> Vec<SwitchState> {
+        self.rows.clone()
+    }
+
+    /// The cached on flag of one switch (automation's `switch toggle`).
+    pub fn is_switch_on(&self, id: SwitchId) -> bool {
+        self.rows.iter().find(|r| r.id == id).is_some_and(|r| r.on)
     }
 
     /// Recording Mode apply (spec 7.1). The countdown is the app layer's job.
@@ -143,12 +304,19 @@ impl SessionEngine {
                 });
                 continue;
             };
-            let availability = switch.availability(&self.os);
+            let availability = if self.probe_failures.contains_key(&id) {
+                Availability::ProbeFailed
+            } else {
+                switch.availability(&self.os)
+            };
             if availability != Availability::Available {
-                self.session.skipped.push(SkippedSwitch {
-                    id,
-                    reason: availability_reason(availability),
-                });
+                // Inline field access: the journal borrow is live for the
+                // rest of the loop, so no &self methods up here.
+                let reason = match self.probe_failures.get(&id) {
+                    Some(probe_reason) => probe_reason.clone(),
+                    None => availability_reason(availability),
+                };
+                self.session.skipped.push(SkippedSwitch { id, reason });
                 continue;
             }
             let before = match switch.read() {
@@ -161,7 +329,7 @@ impl SessionEngine {
                     continue;
                 }
             };
-            let after = switch.target_on(&before, ctx);
+            let after = switch.recording_target(&before, ctx);
             if before == after {
                 continue; // already in that state, nothing to undo (spec 7.1.2)
             }
@@ -210,6 +378,7 @@ impl SessionEngine {
             self.session.applied.push(id);
         }
         self.session.status = SessionStatus::Active;
+        self.refresh_rows();
         // G-1 evidence (prd.md §6): apply time from Start to recording-ready,
         // excluding the countdown, which runs before this in the app layer.
         log::info!(
@@ -220,6 +389,368 @@ impl SessionEngine {
             begun.elapsed().as_millis()
         );
         Ok(&self.session)
+    }
+
+    /// Turn a single switch on or off, optionally with an off-timer
+    /// (FR-27, FR-28, task 4.2). Recording Mode ownership of the active
+    /// session wins; manual on-turns without a timer are not journaled
+    /// (D-030), timers are.
+    pub fn set_switch(
+        &mut self,
+        id: SwitchId,
+        on: bool,
+        off_after: Option<OffAfter>,
+        now: OffsetDateTime,
+        ctx: &Ctx,
+    ) -> Result<(), SwitchError> {
+        let deadline = match &off_after {
+            Some(spec) => Some(parse_off_after(spec, now).map_err(SwitchError::Invalid)?),
+            None => None,
+        };
+
+        let Some(switch) = self.switch(id) else {
+            return Err(SwitchError::Invalid(format!("{id} is not registered")));
+        };
+        let availability = self.effective_availability(id, switch.availability(&self.os));
+        if availability != Availability::Available {
+            return Err(SwitchError::NotAvailable(
+                self.unavailability_reason(id, availability),
+            ));
+        }
+
+        // Actions (screen-saver): fire on "on", never journaled, never timed.
+        if switch.is_action() {
+            if deadline.is_some() {
+                return Err(SwitchError::Invalid(format!(
+                    "{id} starts instantly and cannot have a timer"
+                )));
+            }
+            if on {
+                let target = switch.target_on(&switch.read()?, ctx);
+                switch.apply(&target)?;
+            }
+            self.refresh_rows();
+            return Ok(());
+        }
+
+        // A Recording entry of the active session owns this switch.
+        if self.session.status == SessionStatus::Active
+            && self.journal.as_ref().is_some_and(|j| {
+                j.entries
+                    .iter()
+                    .any(|e| e.owner == JournalOwner::Recording && e.switch == id)
+            })
+        {
+            return match (on, deadline) {
+                (false, _) => {
+                    self.restore_recording_entry(id);
+                    self.refresh_rows();
+                    Ok(())
+                }
+                (true, None) => Ok(()), // already on and owned by the session
+                (true, Some(_)) => Err(SwitchError::Invalid(
+                    "Recording Mode controls this switch while the session is active".into(),
+                )),
+            };
+        }
+
+        if on {
+            match deadline {
+                Some(deadline) => self.set_timer(id, deadline, now, ctx)?,
+                None => self.turn_on(id, ctx)?,
+            }
+        } else {
+            self.turn_off(id, now, ctx)?;
+        }
+        self.refresh_rows();
+        Ok(())
+    }
+
+    /// set_switch step 4: on with an off-timer (FR-28).
+    fn set_timer(
+        &mut self,
+        id: SwitchId,
+        deadline: OffsetDateTime,
+        now: OffsetDateTime,
+        ctx: &Ctx,
+    ) -> Result<(), SwitchError> {
+        {
+            let journal = self
+                .journal
+                .get_or_insert_with(|| Journal::new(&self.app_version, now));
+            // An existing Timer entry just moves its deadline.
+            if let Some(entry) = journal
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|e| e.owner == JournalOwner::Timer && e.switch == id)
+            {
+                entry.off_at = Some(deadline);
+                journal::write(journal, &self.data_dir).map_err(journal_write_err)?;
+                return Ok(());
+            }
+        }
+
+        let switch = self
+            .switches
+            .iter()
+            .find(|s| s.id() == id)
+            .map(|s| s.as_ref())
+            .expect("availability checked in set_switch");
+        let current = switch.read()?;
+        let (before, after, apply_value) = if switch.is_on(&current) {
+            // Already on: the timer turns it off later. What it goes back
+            // to is the recorded manual `before` when we have one, else the
+            // computed target_off.
+            let before = match self.manual.get(&id) {
+                Some((manual_before, _)) => Some(manual_before.clone()),
+                None => switch.target_off(&current, ctx),
+            };
+            let Some(before) = before else {
+                return Err(SwitchError::Invalid(format!(
+                    "{id} is already on and has no recorded off state to return to"
+                )));
+            };
+            (before, current.clone(), None)
+        } else {
+            let after = switch.target_on(&current, ctx);
+            (current, after.clone(), Some(after))
+        };
+
+        let journal = self
+            .journal
+            .get_or_insert_with(|| Journal::new(&self.app_version, now));
+        journal.entries.push(JournalEntry {
+            seq: journal.next_seq(),
+            owner: JournalOwner::Timer,
+            switch: id,
+            before,
+            after,
+            persistent: switch.persistent(),
+            off_at: Some(deadline),
+            at: now,
+        });
+        if let Err(e) = journal::write(journal, &self.data_dir) {
+            let journal = self.journal.as_mut().expect("inserted above");
+            journal.entries.pop();
+            let _ = journal::write(journal, &self.data_dir);
+            return Err(journal_write_err(e));
+        }
+        // The Timer entry now owns restoring; the manual record is superseded.
+        self.manual.remove(&id);
+        if let Some(value) = apply_value
+            && let Err(e) = switch.apply(&value)
+        {
+            let journal = self.journal.as_mut().expect("inserted above");
+            journal.entries.pop();
+            let _ = journal::write(journal, &self.data_dir);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// set_switch step 5: on with no timer. A running timer is dropped (the
+    /// switch stays on with no end); an on-switch is a no-op; else apply
+    /// target_on and remember the manual record (D-030: not journaled).
+    fn turn_on(&mut self, id: SwitchId, ctx: &Ctx) -> Result<(), SwitchError> {
+        if self.drop_timer_entry(id)? {
+            return Ok(()); // stays on, no end
+        }
+        let switch = self
+            .switches
+            .iter()
+            .find(|s| s.id() == id)
+            .map(|s| s.as_ref())
+            .expect("availability checked in set_switch");
+        let before = switch.read()?;
+        if switch.is_on(&before) {
+            return Ok(()); // already on
+        }
+        let after = switch.target_on(&before, ctx);
+        switch.apply(&after)?;
+        self.manual.insert(id, (before, after));
+        Ok(())
+    }
+
+    /// set_switch step 6: off.
+    fn turn_off(
+        &mut self,
+        id: SwitchId,
+        now: OffsetDateTime,
+        ctx: &Ctx,
+    ) -> Result<(), SwitchError> {
+        // A timer means button owns the current on state: restore it now.
+        if self.remove_timer_entry(id)? {
+            return Ok(());
+        }
+        let manual = self.manual.remove(&id);
+        let switch = self
+            .switches
+            .iter()
+            .find(|s| s.id() == id)
+            .map(|s| s.as_ref())
+            .expect("availability checked in set_switch");
+
+        // A manual record knows what the switch came from.
+        if let Some((before, after)) = manual {
+            let entry = JournalEntry {
+                seq: 0,
+                owner: JournalOwner::Timer,
+                switch: id,
+                before,
+                after,
+                persistent: switch.persistent(),
+                off_at: None,
+                at: now,
+            };
+            match switch.restore(&entry) {
+                Ok(RestoreOutcome::Restored) => return Ok(()),
+                Ok(RestoreOutcome::UserChanged | RestoreOutcome::Gone) => {
+                    if !switch.is_on(&switch.read()?) {
+                        return Ok(()); // user turned it off already
+                    }
+                    // Still on but not in our recorded state: fall through
+                    // to target_off below.
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        let current = switch.read()?;
+        if !switch.is_on(&current) {
+            return Ok(()); // already off
+        }
+        match switch.target_off(&current, ctx) {
+            Some(off) => switch.apply(&off),
+            None => Err(SwitchError::Invalid(format!(
+                "{id} is on, but button has nothing recorded to undo"
+            ))),
+        }
+    }
+
+    /// Removes the switch's Timer entry, restoring it first. Returns
+    /// whether an entry existed.
+    fn remove_timer_entry(&mut self, id: SwitchId) -> Result<bool, SwitchError> {
+        let Some(idx) = self.journal.as_ref().and_then(|j| {
+            j.entries
+                .iter()
+                .rposition(|e| e.owner == JournalOwner::Timer && e.switch == id)
+        }) else {
+            return Ok(false);
+        };
+        let entry = self.journal.as_ref().unwrap().entries[idx].clone();
+        self.restore_entry_logged(&entry);
+        self.remove_entry_and_write(idx)?;
+        Ok(true)
+    }
+
+    /// Removes the switch's Timer entry without restoring (the switch stays
+    /// on, no end). Returns whether an entry existed.
+    fn drop_timer_entry(&mut self, id: SwitchId) -> Result<bool, SwitchError> {
+        let Some(idx) = self.journal.as_ref().and_then(|j| {
+            j.entries
+                .iter()
+                .rposition(|e| e.owner == JournalOwner::Timer && e.switch == id)
+        }) else {
+            return Ok(false);
+        };
+        self.remove_entry_and_write(idx)?;
+        Ok(true)
+    }
+
+    /// set_switch step 3-off: restore one Recording entry of the active
+    /// session now and remove it (the session no longer owns the switch).
+    fn restore_recording_entry(&mut self, id: SwitchId) {
+        let Some(idx) = self.journal.as_ref().and_then(|j| {
+            j.entries
+                .iter()
+                .rposition(|e| e.owner == JournalOwner::Recording && e.switch == id)
+        }) else {
+            return;
+        };
+        let entry = self.journal.as_ref().unwrap().entries[idx].clone();
+        self.restore_entry_logged(&entry);
+        let _ = self.remove_entry_and_write(idx);
+    }
+
+    /// Restores one entry and logs the outcome, without touching the
+    /// session summary lists (used by the quick-switch paths).
+    fn restore_entry_logged(&self, entry: &JournalEntry) {
+        match self.switch(entry.switch) {
+            Some(switch) => match switch.restore(entry) {
+                Ok(outcome) => log::info!("restore {}: {outcome:?}", entry.switch),
+                Err(e) => log::error!("restore {}: {e}", entry.switch),
+            },
+            None => log::error!("restore {}: switch not registered", entry.switch),
+        }
+    }
+
+    /// Removes journal entry `idx` and rewrites (or deletes) the file;
+    /// drops the in-memory journal once it is empty.
+    fn remove_entry_and_write(&mut self, idx: usize) -> Result<(), SwitchError> {
+        let journal = self.journal.as_mut().expect("caller checked");
+        journal.entries.remove(idx);
+        if journal.entries.is_empty() {
+            journal::delete(&self.data_dir).map_err(journal_write_err)?;
+            self.journal = None;
+        } else {
+            journal::write(journal, &self.data_dir).map_err(journal_write_err)?;
+        }
+        Ok(())
+    }
+
+    /// Whether any Timer entry is pending (the ticker's work condition).
+    pub fn has_timers(&self) -> bool {
+        self.journal
+            .as_ref()
+            .is_some_and(|j| j.entries.iter().any(|e| e.owner == JournalOwner::Timer))
+    }
+
+    /// Fires every due Timer entry (spec 7.7). Wall-clock deadlines, so a
+    /// deadline missed during sleep fires on the first tick after resume
+    /// (FR-28). Never touches the session status or the applied/skipped/
+    /// failed summary (that is restore_all's job). Returns whether anything
+    /// fired.
+    pub fn fire_due_timers(&mut self, now: OffsetDateTime) -> bool {
+        let mut fired = false;
+        while let Some(idx) = self.journal.as_ref().and_then(|j| {
+            j.entries
+                .iter()
+                .rposition(|e| e.owner == JournalOwner::Timer && e.off_at.is_some_and(|t| t <= now))
+        }) {
+            let entry = self.journal.as_ref().unwrap().entries[idx].clone();
+            self.restore_entry_logged(&entry);
+            if let Err(e) = self.remove_entry_and_write(idx) {
+                log::error!("timer {}: journal write failed: {e}", entry.switch);
+            }
+            fired = true;
+        }
+        if fired {
+            self.refresh_rows();
+        }
+        fired
+    }
+
+    /// CLI `restore` (spec 6.3): stop the active session if any, then
+    /// restore EVERY remaining entry — including Timer entries that are not
+    /// due yet. Never runs launch recovery while the app runs: that would
+    /// drop non-persistent entries like keep-awake (spec 7.3 vs 7.2).
+    pub fn restore_all_now(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
+        if self.session.status == SessionStatus::Active {
+            self.restore_all(now)?;
+        }
+        while let Some(idx) = self
+            .journal
+            .as_ref()
+            .and_then(|j| j.entries.iter().rposition(|_| true))
+        {
+            let entry = self.journal.as_ref().unwrap().entries[idx].clone();
+            self.restore_entry_logged(&entry);
+            self.remove_entry_and_write(idx)
+                .map_err(|e| SessionError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        self.refresh_rows();
+        Ok(())
     }
 
     /// Restore everything the journal still owns (spec 7.2). Idempotent:
@@ -288,11 +819,13 @@ impl SessionEngine {
     fn restore_all(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
         if self.journal.is_none() {
             self.session.status = SessionStatus::Idle;
+            self.refresh_rows();
             return Ok(());
         }
         self.session.status = SessionStatus::Restoring;
         let result = self.restore_entries(now);
         self.session.status = SessionStatus::Idle;
+        self.refresh_rows();
         result
     }
 
@@ -317,12 +850,7 @@ impl SessionEngine {
     }
 
     fn restore_one(&mut self, entry: &JournalEntry) {
-        let Some(switch) = self
-            .switches
-            .iter()
-            .find(|s| s.id() == entry.switch)
-            .map(|s| s.as_ref())
-        else {
+        let Some(switch) = self.switch(entry.switch) else {
             self.session.failed.push(SkippedSwitch {
                 id: entry.switch,
                 reason: "switch not registered".into(),
@@ -396,10 +924,17 @@ mod tests {
     fn opts(panic_at: Option<PanicAt>, availability: Availability) -> FakeOptions {
         FakeOptions {
             availability,
-            persistent: false,
-            fail_apply: false,
-            fail_restore: false,
             panic_at,
+            ..manual_opts()
+        }
+    }
+
+    /// Quick-switch-capable options: target_off works like the real
+    /// desktop-icons/taskbar switches.
+    fn manual_opts() -> FakeOptions {
+        FakeOptions {
+            has_target_off: true,
+            ..FakeOptions::default()
         }
     }
 
@@ -451,6 +986,26 @@ mod tests {
         rig.handles.iter().all(|h| !h.is_on())
     }
 
+    /// The rig's index of a switch id.
+    fn idx(id: SwitchId) -> usize {
+        IDS.iter().position(|s| *s == id).unwrap()
+    }
+
+    /// The Timer entry of one switch in the on-disk journal, if any.
+    fn timer_entry(
+        dir: &std::path::Path,
+        id: SwitchId,
+    ) -> Option<(serde_json::Value, serde_json::Value, Option<OffsetDateTime>)> {
+        match journal::read(dir) {
+            JournalRead::Ok(j) => j
+                .entries
+                .iter()
+                .find(|e| e.owner == JournalOwner::Timer && e.switch == id)
+                .map(|e| (e.before.clone(), e.after.clone(), e.off_at)),
+            _ => None,
+        }
+    }
+
     #[test]
     fn start_applies_in_fixed_order_and_journals() {
         let dir = test_dir("start");
@@ -484,12 +1039,12 @@ mod tests {
     fn switch_states_reflect_the_registry_and_journal_timers() {
         let dir = test_dir("switch-states");
         let mut rig = build(&dir, |_| opts(None, Availability::Available));
-        let states = rig.engine.switch_states();
-        assert!(states.iter().all(|s| !s.on && s.off_at.is_none()));
 
-        // Starting Recording Mode turns every available fake on (FR-4).
+        // Starting Recording Mode turns every available fake on (FR-4) and
+        // the row cache follows.
         rig.engine.start(now(), &IDS, &ctx()).unwrap();
         let states = rig.engine.switch_states();
+        assert_eq!(states.len(), 3);
         assert!(states.iter().all(|s| s.on));
 
         // A timer entry in the journal surfaces as off_at for that switch:
@@ -791,5 +1346,530 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- Quick switches (task 4.2) ----
+
+    #[test]
+    fn manual_on_and_off_without_a_timer_is_not_journaled() {
+        let dir = test_dir("manual-on-off");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.engine
+            .set_switch(SwitchId::DesktopIcons, true, None, now(), &ctx())
+            .unwrap();
+        assert!(rig.handles[idx(SwitchId::DesktopIcons)].is_on());
+        assert_eq!(journal_len(&dir), 0, "D-030: no journal for manual on");
+        assert!(rig.engine.is_switch_on(SwitchId::DesktopIcons));
+
+        rig.engine
+            .set_switch(SwitchId::DesktopIcons, false, None, later(), &ctx())
+            .unwrap();
+        assert!(!rig.handles[idx(SwitchId::DesktopIcons)].is_on());
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn off_of_an_unrecorded_on_state_uses_target_off() {
+        let dir = test_dir("target-off");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.handles[idx(SwitchId::Taskbar)].set(true); // on, but not by button
+        rig.engine
+            .set_switch(SwitchId::Taskbar, false, None, now(), &ctx())
+            .unwrap();
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+    }
+
+    #[test]
+    fn off_without_a_record_or_target_off_is_invalid() {
+        let dir = test_dir("nothing-to-undo");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 0 {
+                o.has_target_off = false; // like other-apps
+            }
+            o
+        });
+        rig.handles[idx(SwitchId::DesktopIcons)].set(true);
+        let err = rig
+            .engine
+            .set_switch(SwitchId::DesktopIcons, false, None, now(), &ctx())
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::Invalid(_)));
+        assert!(rig.handles[idx(SwitchId::DesktopIcons)].is_on());
+    }
+
+    #[test]
+    fn timer_is_journaled_before_apply_and_fires() {
+        let dir = test_dir("timer");
+        let mut rig = build(&dir, |_| manual_opts());
+        let deadline = datetime!(2026-10-26 12:15:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+        let (before, after, off_at) = timer_entry(&dir, SwitchId::Taskbar).unwrap();
+        assert_eq!(before, serde_json::json!(false));
+        assert_eq!(after, serde_json::json!(true));
+        assert_eq!(off_at, Some(deadline));
+        assert_eq!(
+            rig.engine.switch_states()[idx(SwitchId::Taskbar)].off_at,
+            Some(deadline)
+        );
+
+        // Not due yet: nothing fires and no reads are done by the check.
+        let reads_before = rig.handles[idx(SwitchId::Taskbar)].read_count();
+        assert!(!rig.engine.fire_due_timers(now()));
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(
+            rig.handles[idx(SwitchId::Taskbar)].read_count(),
+            reads_before,
+            "a non-firing check does no reads"
+        );
+
+        // Due: the entry restores and the journal empties. The session
+        // stays Idle throughout (spec 7.7: timers never touch it).
+        assert!(rig.engine.fire_due_timers(deadline));
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(journal_len(&dir), 0);
+        assert_eq!(rig.engine.state().status, SessionStatus::Idle);
+        assert!(rig.engine.state().applied.is_empty());
+        assert!(!rig.engine.has_timers());
+    }
+
+    #[test]
+    fn timer_entry_updates_its_deadline_when_set_again() {
+        let dir = test_dir("timer-update");
+        let mut rig = build(&dir, |_| manual_opts());
+        let first = datetime!(2026-10-26 13:00:00 UTC);
+        let second = datetime!(2026-10-26 14:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: first }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: second }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        assert_eq!(journal_len(&dir), 1, "the same timer moved, not doubled");
+        assert_eq!(
+            timer_entry(&dir, SwitchId::Taskbar).unwrap().2,
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn already_on_switch_gets_a_timer_with_target_off_as_before() {
+        // Turned on outside button (a user change), then a timer is added:
+        // before must come from target_off and no apply happens.
+        let dir = test_dir("timer-on-on");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.handles[idx(SwitchId::Taskbar)].set(true);
+        let deadline = datetime!(2026-10-26 12:30:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        let (before, after, _) = timer_entry(&dir, SwitchId::Taskbar).unwrap();
+        assert_eq!(
+            before,
+            serde_json::json!(false),
+            "target_off becomes before"
+        );
+        assert_eq!(after, serde_json::json!(true), "after is the current state");
+        assert!(rig.engine.fire_due_timers(deadline));
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+    }
+
+    #[test]
+    fn manual_record_feeds_the_timer_before_when_one_is_added() {
+        let dir = test_dir("timer-manual-record");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap(); // manual record: (false, true)
+        rig.handles[idx(SwitchId::Taskbar)].set(false); // user turned it off
+        rig.handles[idx(SwitchId::Taskbar)].set(true); // and on again by hand
+        let deadline = datetime!(2026-10-26 12:45:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        let (before, _, _) = timer_entry(&dir, SwitchId::Taskbar).unwrap();
+        assert_eq!(before, serde_json::json!(false), "manual.before wins");
+    }
+
+    #[test]
+    fn turning_on_without_a_timer_drops_an_existing_timer() {
+        let dir = test_dir("timer-drop");
+        let mut rig = build(&dir, |_| manual_opts());
+        let deadline = datetime!(2026-10-26 13:30:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        rig.engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap();
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on(), "stays on");
+        assert_eq!(journal_len(&dir), 0, "the timer entry is gone");
+        assert!(!rig.engine.has_timers());
+    }
+
+    #[test]
+    fn turning_off_a_timed_switch_restores_it_immediately() {
+        let dir = test_dir("timer-off-now");
+        let mut rig = build(&dir, |_| manual_opts());
+        let deadline = datetime!(2026-10-26 15:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        rig.engine
+            .set_switch(SwitchId::Taskbar, false, None, now(), &ctx())
+            .unwrap();
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn recording_owned_switches_follow_the_session_rules() {
+        let dir = test_dir("recording-owned");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
+
+        // on -> no-op (already on, owned by the session)
+        rig.engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap();
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+
+        // on + timer -> rejected
+        let err = rig
+            .engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::Preset("15m".into())),
+                now(),
+                &ctx(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::Invalid(_)));
+
+        // off -> restores just that entry now
+        rig.engine
+            .set_switch(SwitchId::Taskbar, false, None, now(), &ctx())
+            .unwrap();
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(rig.engine.state().status, SessionStatus::Active);
+        assert_eq!(journal_len(&dir), 2, "the other session entries remain");
+        rig.engine.stop(later()).unwrap();
+        assert!(all_off(&rig));
+    }
+
+    #[test]
+    fn actions_never_journal_and_reject_timers() {
+        let dir = test_dir("action");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 0 {
+                o.is_action = true; // like screen-saver
+            }
+            o
+        });
+        rig.engine
+            .set_switch(SwitchId::DesktopIcons, true, None, now(), &ctx())
+            .unwrap();
+        assert_eq!(journal_len(&dir), 0, "actions are never journaled");
+        // off is a no-op
+        rig.engine
+            .set_switch(SwitchId::DesktopIcons, false, None, now(), &ctx())
+            .unwrap();
+        // a timer is rejected
+        let err = rig
+            .engine
+            .set_switch(
+                SwitchId::DesktopIcons,
+                true,
+                Some(OffAfter::Preset("1h".into())),
+                now(),
+                &ctx(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::Invalid(_)));
+    }
+
+    #[test]
+    fn failed_probe_disables_the_switch_for_everything() {
+        let dir = test_dir("probe-failed");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 1 {
+                o.fail_probe = true;
+                o.experimental = true; // probes run for experimental switches
+            }
+            o
+        });
+        rig.engine.run_probes();
+        // Row detail carries the reason (FR-35).
+        let states = rig.engine.switch_states();
+        let taskbar = states.iter().find(|s| s.id == SwitchId::Taskbar).unwrap();
+        assert_eq!(taskbar.availability, Availability::ProbeFailed);
+        assert_eq!(taskbar.detail.as_deref(), Some("fake probe failure"));
+
+        // set_switch refuses it.
+        let err = rig
+            .engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::NotAvailable(_)));
+
+        // Recording Mode skips it with the reason.
+        let selected = [SwitchId::DesktopIcons, SwitchId::Taskbar];
+        rig.engine.start(now(), &selected, &ctx()).unwrap();
+        assert_eq!(rig.engine.state().applied, vec![SwitchId::DesktopIcons]);
+        assert_eq!(rig.engine.state().skipped.len(), 1);
+        assert_eq!(rig.engine.state().skipped[0].reason, "fake probe failure");
+    }
+
+    #[test]
+    fn unavailable_switch_cannot_be_set() {
+        let dir = test_dir("set-unavailable");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 1 {
+                o.availability = Availability::NeedsWindows11;
+            }
+            o
+        });
+        let err = rig
+            .engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::NotAvailable(_)));
+    }
+
+    #[test]
+    fn restore_all_now_also_restores_future_timers() {
+        let dir = test_dir("restore-all-now");
+        let mut rig = build(&dir, |_| manual_opts());
+        let deadline = datetime!(2027-01-01 08:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        assert!(rig.engine.has_timers());
+        rig.engine.restore_all_now(now()).unwrap();
+        assert!(
+            !rig.handles[idx(SwitchId::Taskbar)].is_on(),
+            "future timer restored"
+        );
+        assert_eq!(journal_len(&dir), 0);
+
+        // With an active session, it stops the session too.
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
+        assert!(
+            rig.engine
+                .set_switch(
+                    SwitchId::KeepAwake,
+                    true,
+                    Some(OffAfter::At { at: deadline }),
+                    later(),
+                    &ctx(),
+                )
+                .is_err(),
+            "keep-awake is owned by the active session"
+        );
+        rig.engine.restore_all_now(later()).unwrap();
+        assert_eq!(rig.engine.state().status, SessionStatus::Idle);
+        assert!(all_off(&rig));
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn a_rearmed_timer_fires_after_recovery() {
+        // A timer entry on disk with a future deadline survives recovery and
+        // is fired by the ticker path (spec 7.7).
+        let dir = test_dir("timer-after-recovery");
+        let mut journal = journal::Journal::new("0.1.0", now());
+        journal.entries.push(JournalEntry {
+            seq: journal.next_seq(),
+            owner: JournalOwner::Timer,
+            switch: SwitchId::Taskbar,
+            before: serde_json::json!(false),
+            after: serde_json::json!(true),
+            persistent: true,
+            off_at: Some(later()),
+            at: now(),
+        });
+        journal::write(&journal, &dir).unwrap();
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.engine.recover(now()).unwrap();
+        rig.handles[idx(SwitchId::Taskbar)].set(true); // the OS still has it on
+        assert!(rig.engine.has_timers());
+        assert!(rig.engine.fire_due_timers(later()));
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn the_row_cache_keeps_the_ticker_read_free() {
+        let dir = test_dir("ticker-zero-reads");
+        let mut rig = build(&dir, |_| manual_opts());
+        rig.engine.refresh_rows();
+        let deadline = datetime!(2026-10-26 16:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::DesktopIcons,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        let reads: Vec<usize> = rig.handles.iter().map(|h| h.read_count()).collect();
+        // What the ticker does every second: has_timers + switch_states.
+        let _timers = rig.engine.has_timers();
+        let _states = rig.engine.switch_states();
+        let _states = rig.engine.switch_states();
+        let after: Vec<usize> = rig.handles.iter().map(|h| h.read_count()).collect();
+        assert_eq!(reads, after, "the ticker path does zero switch reads");
+    }
+
+    // ---- offAfter parsing (task 4.2) ----
+
+    #[test]
+    fn off_after_presets_parse() {
+        assert_eq!(
+            parse_off_after(&OffAfter::Preset("15m".into()), now()).unwrap(),
+            datetime!(2026-10-26 12:15:00 UTC)
+        );
+        assert_eq!(
+            parse_off_after(&OffAfter::Preset("1h".into()), now()).unwrap(),
+            datetime!(2026-10-26 13:00:00 UTC)
+        );
+        assert_eq!(
+            parse_off_after(&OffAfter::Preset("4h".into()), now()).unwrap(),
+            datetime!(2026-10-26 16:00:00 UTC)
+        );
+        assert!(parse_off_after(&OffAfter::Preset("5m".into()), now()).is_err());
+        assert!(parse_off_after(&OffAfter::Minutes { minutes: 0 }, now()).is_err());
+        assert!(parse_off_after(&OffAfter::Minutes { minutes: 1441 }, now()).is_err());
+        assert_eq!(
+            parse_off_after(&OffAfter::Minutes { minutes: 90 }, now()).unwrap(),
+            datetime!(2026-10-26 13:30:00 UTC)
+        );
+        let past = OffAfter::At {
+            at: datetime!(2026-10-26 11:00:00 UTC),
+        };
+        assert!(parse_off_after(&past, now()).is_err(), "at must be future");
+        let future = OffAfter::At {
+            at: datetime!(2026-10-26 18:00:00 UTC),
+        };
+        assert_eq!(
+            parse_off_after(&future, now()).unwrap(),
+            datetime!(2026-10-26 18:00:00 UTC)
+        );
+    }
+
+    #[test]
+    fn tomorrow_0800_is_the_next_local_eight_oclock() {
+        // Zone-independent check (CI runs UTC, the reference PC +05:30):
+        // the result lands on 08:00 local, on the date the D-079 rule
+        // picks from the chooser's local time.
+        let eight = time::Time::from_hms(8, 0, 0).unwrap();
+        for chooser in [
+            datetime!(2026-10-26 2:00:00 UTC),  // early morning UTC
+            datetime!(2026-10-26 12:00:00 UTC), // afternoon
+            datetime!(2026-10-26 23:30:00 UTC), // late night
+        ] {
+            let at = parse_off_after(&OffAfter::Preset("tomorrow".into()), chooser).unwrap();
+            assert!(at > chooser, "tomorrow is always in the future");
+            let at_local = at.to_offset(UtcOffset::local_offset_at(at).unwrap());
+            assert_eq!(at_local.time(), eight, "lands on 08:00 local");
+            let chooser_local = chooser.to_offset(UtcOffset::local_offset_at(chooser).unwrap());
+            let expected_date = next_0800_date(chooser_local.date(), chooser_local.time()).unwrap();
+            assert_eq!(at_local.date(), expected_date);
+        }
+    }
+
+    #[test]
+    fn next_0800_date_follows_the_d079_rule() {
+        use time::macros::date;
+        let d = date!(2026 - 10 - 26);
+        let before_eight = time::Time::from_hms(7, 59, 0).unwrap();
+        let at_eight = time::Time::from_hms(8, 0, 0).unwrap();
+        let evening = time::Time::from_hms(21, 15, 0).unwrap();
+        assert_eq!(next_0800_date(d, before_eight).unwrap(), d);
+        assert_eq!(
+            next_0800_date(d, at_eight).unwrap(),
+            date!(2026 - 10 - 27),
+            "exactly 08:00 counts as at-or-after"
+        );
+        assert_eq!(next_0800_date(d, evening).unwrap(), date!(2026 - 10 - 27));
+    }
+
+    #[test]
+    fn serde_off_after_shapes() {
+        // The IPC shapes (spec 6.1): preset strings, {minutes}, {at}.
+        assert_eq!(
+            serde_json::from_value::<OffAfter>(serde_json::json!("15m")).unwrap(),
+            OffAfter::Preset("15m".into())
+        );
+        assert_eq!(
+            serde_json::from_value::<OffAfter>(serde_json::json!({ "minutes": 30 })).unwrap(),
+            OffAfter::Minutes { minutes: 30 }
+        );
+        assert_eq!(
+            serde_json::from_value::<OffAfter>(serde_json::json!({
+                "at": "2026-10-26T18:00:00Z"
+            }))
+            .unwrap(),
+            OffAfter::At {
+                at: datetime!(2026-10-26 18:00:00 UTC)
+            }
+        );
+        assert!(serde_json::from_value::<OffAfter>(serde_json::json!(5)).is_err());
     }
 }

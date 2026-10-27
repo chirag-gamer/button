@@ -11,6 +11,7 @@ export default defineConfig(() => ({
       input: {
         dropdown: "dropdown.html",
         backdrop: "backdrop.html",
+        lock: "lock.html",
       },
     },
   },

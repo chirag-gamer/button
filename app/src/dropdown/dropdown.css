@@ -126,3 +126,108 @@ button.link {
   border: none;
   cursor: pointer;
 }
+
+/* Quick switches (FR-27, FR-28) and their menus (task 4.1/4.2). */
+
+.summary {
+  margin: -2px 0 0 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.row {
+  position: relative; /* anchors the popover menu */
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.row.unavailable {
+  cursor: default;
+}
+
+.row .more-btn {
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.row .more-btn:hover {
+  color: var(--fg);
+  background: var(--border);
+}
+
+.row .chips {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.row .chip {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.row .chip:hover {
+  border-color: var(--accent);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  right: 6px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 25%);
+}
+
+.menu button {
+  padding: 6px 10px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--fg);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu button:hover,
+.menu button.current {
+  background: var(--surface);
+}
+
+.menu button.current {
+  font-weight: 600;
+}
+
+.menu-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.menu-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}

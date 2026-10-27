@@ -61,7 +61,22 @@ export interface Settings {
   schemaVersion: number;
   recordingMode: { actions: SwitchId[] };
   dropdown: { shown: SwitchId[]; more: SwitchId[]; hidden: SwitchId[] };
+  keepAwake: { defaultMinutes: number; allowDisplayOff: boolean };
+  bluetooth: { deviceId: string | null };
 }
+
+/** One Bluetooth audio device from `list_bt_devices` (FR-38). */
+export interface BtDevice {
+  id: string;
+  name: string;
+  connected: boolean;
+  battery: number | null;
+}
+
+/** The `offAfter` argument of `set_switch` (spec 6.1, D-051): a preset
+ * string ("15m" | "1h" | "4h" | "tomorrow"), a minute count, or an RFC
+ * 3339 time in the future. */
+export type OffAfter = string | { minutes: number } | { at: string };
 
 // ---- Commands (spec 6.1) ----
 
@@ -81,9 +96,9 @@ export class IpcError extends Error {
   }
 }
 
-async function call<T>(command: string): Promise<T> {
+async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return await invoke<T>(command);
+    return await invoke<T>(command, args);
   } catch (e) {
     // The core rejects with { code, message } (spec 6.1).
     const shape = e as { code?: IpcErrorCode; message?: string };
@@ -99,6 +114,14 @@ export const getSettings = () => call<Settings>("get_settings");
 export const startRecording = () => call<AppState>("start_recording");
 export const stopRecording = () => call<AppState>("stop_recording");
 export const toggleRecording = () => call<AppState>("toggle_recording");
+export const setSwitch = (id: SwitchId, on: boolean, offAfter?: OffAfter) =>
+  call<AppState>("set_switch", { id, on, offAfter });
+export const unlockKeyboard = () => call<AppState>("unlock_keyboard");
+export const listBtDevices = () => call<BtDevice[]>("list_bt_devices");
+export const setBluetoothDevice = (id: string | null) =>
+  call<Settings>("set_bluetooth_device", { id });
+export const setKeepAwakeOptions = (allowDisplayOff: boolean) =>
+  call<Settings>("set_keep_awake_options", { allowDisplayOff });
 
 // ---- Events (spec 6.2) ----
 
@@ -106,4 +129,8 @@ export function onStateChanged(
   handler: (state: AppState) => void,
 ): Promise<() => void> {
   return listen<AppState>("state-changed", (event) => handler(event.payload));
+}
+
+export function onSettingsChanged(handler: (settings: Settings) => void): Promise<() => void> {
+  return listen<Settings>("settings-changed", (event) => handler(event.payload));
 }

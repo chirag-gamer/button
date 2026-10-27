@@ -1,16 +1,24 @@
-// Dropdown panel (FR-2): Recording Mode card + the switch shelves (FR-44).
-// Read-only in Phase 2: quick switches arrive in Phase 4 (FR-27, FR-28).
+// Dropdown panel (FR-2): Recording Mode card + the switch shelves (FR-44),
+// with clickable switch rows, off-timer menus (FR-27, FR-28), the Keep
+// Awake durations (FR-18, D-081) and the Bluetooth picker (FR-38).
 import "./dropdown.css";
 import "../shared/theme.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AppState,
   Availability,
-  getState,
-  getSettings,
-  onStateChanged,
+  BtDevice,
+  OffAfter,
   Settings,
   SwitchId,
+  getState,
+  getSettings,
+  listBtDevices,
+  onSettingsChanged,
+  onStateChanged,
+  setBluetoothDevice,
+  setKeepAwakeOptions,
+  setSwitch,
   toggleRecording,
 } from "../shared/ipc";
 import { formatElapsed } from "../shared/format";
@@ -40,15 +48,67 @@ const UNAVAILABLE_LABELS: Record<Availability, string> = {
   "not-built": "Not built yet",
 };
 
+// The generic off-timer presets (D-051); Keep Awake adds its own set.
+const TIMER_PRESETS: { label: string; value: OffAfter }[] = [
+  { label: "15 min", value: "15m" },
+  { label: "1 h", value: "1h" },
+  { label: "4 h", value: "4h" },
+  { label: "Tomorrow 8:00", value: "tomorrow" },
+];
+
+const KEEP_AWAKE_PRESETS: { label: string; value: OffAfter | undefined }[] = [
+  { label: "15 min", value: "15m" },
+  { label: "1 h", value: "1h" },
+  { label: "2 h", value: { minutes: 120 } },
+  { label: "4 h", value: "4h" },
+  { label: "Tomorrow 8:00", value: "tomorrow" },
+  { label: "No end", value: undefined },
+];
+
+const EXTEND_CHIPS: { label: string; minutes: number }[] = [
+  { label: "+15 min", minutes: 15 },
+  { label: "+1 h", minutes: 60 },
+  { label: "+4 h", minutes: 240 },
+];
+
 let state: AppState | undefined;
 let settings: Settings | undefined;
+let btDevices: BtDevice[] = [];
 let showAll = false;
+// The one open popover (timer menu or Bluetooth picker), closed on any
+// click outside it.
+let openMenu: HTMLElement | undefined;
 
 const count = document.getElementById("action-count")!;
 const startRestore = document.getElementById("start-restore") as HTMLButtonElement;
 const shelf = document.getElementById("shelf")!;
 const showAllButton = document.getElementById("show-all") as HTMLButtonElement;
 const more = document.getElementById("more")!;
+const summary = document.getElementById("switch-summary")!;
+const switchError = document.getElementById("switch-error")!;
+
+let errorTimer: number | undefined;
+
+/** FR-27's inline error surface: the message shows for 4 s. */
+function showError(message: string): void {
+  switchError.textContent = message;
+  switchError.hidden = false;
+  window.clearTimeout(errorTimer);
+  errorTimer = window.setTimeout(() => {
+    switchError.hidden = true;
+  }, 4000);
+}
+
+function closeMenu(): void {
+  openMenu?.remove();
+  openMenu = undefined;
+}
+
+document.addEventListener("click", (e) => {
+  if (openMenu && e.target instanceof Node && !openMenu.contains(e.target)) {
+    closeMenu();
+  }
+});
 
 function render(): void {
   if (!state || !settings) return;
@@ -68,6 +128,14 @@ function render(): void {
   startRestore.classList.toggle("recording", active);
   startRestore.disabled =
     state.session.status !== "idle" && state.session.status !== "active";
+
+  // Summary (FR-27): available, non-action switches only.
+  const counted = state.switches.filter(
+    (s) => s.availability === "available" && !isAction(s.id),
+  );
+  const on = counted.filter((s) => s.on).length;
+  summary.textContent = `${on} on · ${counted.length - on} off`;
+  summary.hidden = counted.length === 0;
 
   // Shelves (FR-44): shown, "Show all", hidden.
   const byId = new Map(state.switches.map((s) => [s.id, s]));
@@ -91,21 +159,32 @@ function renderShelf(
   }
 }
 
+function isAction(id: SwitchId): boolean {
+  // Actions have no on/off state: the engine marks screen-saver; the lock
+  // row's click means "lock now" in the same way.
+  return id === "screen-saver" || id === "lock-keyboard";
+}
+
 function row(s: AppState["switches"][number]): HTMLElement {
   const rowEl = document.createElement("div");
   rowEl.className = "row";
   if (s.availability !== "available") rowEl.classList.add("unavailable");
+  if (isAction(s.id) || s.id === "keep-awake") rowEl.classList.add("wide");
 
   const name = document.createElement("span");
   name.className = "name";
   name.textContent = LABELS[s.id];
   rowEl.append(name);
 
+  if (s.id === "bluetooth") {
+    rowEl.append(bluetoothDetail());
+  }
+
   if (s.experimental) {
     rowEl.append(badge("Experimental"));
   }
   if (s.availability !== "available") {
-    rowEl.append(badge(UNAVAILABLE_LABELS[s.availability]));
+    rowEl.append(badge(s.detail ?? UNAVAILABLE_LABELS[s.availability]));
   } else if (s.offAt) {
     const secondsLeft = (Date.parse(s.offAt) - Date.now()) / 1000;
     if (secondsLeft > 0) {
@@ -113,10 +192,185 @@ function row(s: AppState["switches"][number]): HTMLElement {
     }
   }
 
-  const dot = document.createElement("span");
-  dot.className = s.on ? "state on" : "state";
-  rowEl.append(dot);
+  // Clicking a row toggles it (FR-27). Keep Awake's plain click uses the
+  // default duration (D-081); actions fire their trigger.
+  rowEl.addEventListener("click", () => {
+    void toggleRow(s);
+  });
+
+  if (s.availability === "available" && !isAction(s.id)) {
+    const more = document.createElement("button");
+    more.className = "more-btn";
+    more.textContent = "⋯";
+    more.title = "Timer options";
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openRowMenu(rowEl, s);
+    });
+    rowEl.append(more);
+  }
+
+  if (s.id === "keep-awake" && s.on) {
+    rowEl.append(extendChips(s));
+  }
+
+  if (s.id === "screen-saver") {
+    rowEl.append(badge("Start"));
+  } else {
+    const dot = document.createElement("span");
+    dot.className = s.on ? "state on" : "state";
+    rowEl.title = isAction(s.id) ? "" : s.on ? "Turn off" : "Turn on";
+    rowEl.append(dot);
+  }
   return rowEl;
+}
+
+async function toggleRow(s: AppState["switches"][number]): Promise<void> {
+  if (s.availability !== "available") return;
+  try {
+    if (s.id === "keep-awake" && !s.on && settings) {
+      // Plain click: on for the default duration (D-081).
+      state = await setSwitch(s.id, true, {
+        minutes: settings.keepAwake.defaultMinutes,
+      });
+    } else {
+      state = await setSwitch(s.id, !s.on);
+    }
+    if (s.id === "bluetooth") refreshBtSoon();
+    render();
+  } catch (e) {
+    showError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** The +N chips shift an existing deadline, or start one from now. */
+function extendChips(s: AppState["switches"][number]): HTMLElement {
+  const chips = document.createElement("span");
+  chips.className = "chips";
+  for (const chip of EXTEND_CHIPS) {
+    const button = document.createElement("button");
+    button.className = "chip";
+    button.textContent = chip.label;
+    button.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const from = s.offAt ? Date.parse(s.offAt) : Date.now();
+      const at = new Date(from + chip.minutes * 60_000).toISOString();
+      try {
+        state = await setSwitch(s.id, true, { at });
+        render();
+      } catch (err) {
+        showError(err instanceof Error ? err.message : String(err));
+      }
+    });
+    chips.append(button);
+  }
+  return chips;
+}
+
+function bluetoothDetail(): HTMLElement {
+  const chosen = settings?.bluetooth.deviceId;
+  const device = btDevices.find((d) => d.id === chosen);
+  const detail = document.createElement("span");
+  detail.className = "detail";
+  if (!chosen) {
+    detail.textContent = "Choose a device";
+  } else if (device) {
+    const battery = device.battery === null ? "n/a" : `${device.battery}%`;
+    detail.textContent = `${device.name} · ${battery}`;
+  } else {
+    detail.textContent = "Device not found";
+  }
+  return detail;
+}
+
+/** The "⋯" popover: timer presets, Keep Awake extras, or the BT picker. */
+function openRowMenu(rowEl: HTMLElement, s: AppState["switches"][number]): void {
+  closeMenu();
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  if (s.id === "bluetooth") {
+    fillBtPicker(menu);
+  } else {
+    const presets = s.id === "keep-awake" ? KEEP_AWAKE_PRESETS : TIMER_PRESETS;
+    for (const preset of presets) {
+      const item = document.createElement("button");
+      item.textContent = preset.label;
+      item.addEventListener("click", async () => {
+        closeMenu();
+        try {
+          state = await setSwitch(s.id, true, preset.value);
+          render();
+        } catch (e) {
+          showError(e instanceof Error ? e.message : String(e));
+        }
+      });
+      menu.append(item);
+    }
+    if (s.id === "keep-awake" && settings) {
+      const label = document.createElement("label");
+      label.className = "menu-check";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = settings.keepAwake.allowDisplayOff;
+      box.addEventListener("change", async () => {
+        try {
+          settings = await setKeepAwakeOptions(box.checked);
+          render();
+        } catch (e) {
+          showError(e instanceof Error ? e.message : String(e));
+          box.checked = !box.checked;
+        }
+      });
+      label.append(box, " Let the screen turn off");
+      menu.append(label);
+    }
+  }
+  rowEl.append(menu);
+  openMenu = menu;
+}
+
+function fillBtPicker(menu: HTMLElement): void {
+  if (btDevices.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "menu-empty";
+    empty.textContent = "No paired Bluetooth audio devices";
+    menu.append(empty);
+  }
+  for (const device of btDevices) {
+    const item = document.createElement("button");
+    const battery = device.battery === null ? "" : ` · ${device.battery}%`;
+    item.textContent = `${device.connected ? "● " : ""}${device.name}${battery}`;
+    if (device.id === settings?.bluetooth.deviceId) {
+      item.classList.add("current");
+    }
+    item.addEventListener("click", async () => {
+      closeMenu();
+      try {
+        settings = await setBluetoothDevice(device.id);
+        render();
+      } catch (e) {
+        showError(e instanceof Error ? e.message : String(e));
+      }
+    });
+    menu.append(item);
+  }
+}
+
+/** Connecting settles over seconds: refresh the picker list a few times
+ * after a connect/disconnect click (mirrors the core's row refreshes). */
+function refreshBtSoon(): void {
+  for (const delay of [3000, 8000]) {
+    window.setTimeout(() => {
+      void listBtDevices()
+        .then((devices) => {
+          btDevices = devices;
+          render();
+        })
+        .catch(() => {
+          /* picker keeps the last list; errors already surfaced on click */
+        });
+    }, delay);
+  }
 }
 
 function badge(text: string): HTMLElement {
@@ -149,12 +403,19 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") void getCurrentWindow().hide();
 });
 
-Promise.all([getState(), getSettings()]).then(([initialState, initialSettings]) => {
-  state = initialState;
-  settings = initialSettings;
-  render();
-});
+Promise.all([getState(), getSettings(), listBtDevices().catch(() => [])]).then(
+  ([initialState, initialSettings, devices]) => {
+    state = initialState;
+    settings = initialSettings;
+    btDevices = devices;
+    render();
+  },
+);
 void onStateChanged((next) => {
   state = next;
+  render();
+});
+void onSettingsChanged((next) => {
+  settings = next;
   render();
 });

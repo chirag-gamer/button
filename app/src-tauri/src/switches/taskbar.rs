@@ -45,6 +45,10 @@ impl Switch for Taskbar {
         serde_json::json!(State { auto_hide: true })
     }
 
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State { auto_hide: false }))
+    }
+
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "taskbar")?;
         if auto_hide()? == target.auto_hide {

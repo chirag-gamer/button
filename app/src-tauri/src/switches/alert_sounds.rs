@@ -65,6 +65,10 @@ impl Switch for AlertSounds {
         serde_json::json!(State { muted: true })
     }
 
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        Some(serde_json::json!(State { muted: false }))
+    }
+
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
         let target = parse_state::<State>(value, "alert sounds")?;
         let _guard = ComGuard::new()?;

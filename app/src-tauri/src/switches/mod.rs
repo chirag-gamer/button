@@ -11,9 +11,16 @@ pub mod fake;
 
 mod alert_sounds;
 mod backdrop;
+pub(crate) mod bluetooth;
+mod dark_mode;
 mod desktop_icons;
+mod dnd;
 mod keep_awake;
+pub(crate) mod lock_keyboard;
+mod microphone;
+mod night_light;
 mod other_apps;
+mod screen_saver;
 mod taskbar;
 mod tray_icons;
 
@@ -50,6 +57,13 @@ pub fn build_registry(data_dir: &std::path::Path) -> Vec<Box<dyn Switch>> {
         Box::new(taskbar::Taskbar),
         Box::new(tray_icons::TrayIcons),
         Box::new(keep_awake::KeepAwake::new()),
+        Box::new(dark_mode::DarkMode),
+        Box::new(dnd::Dnd),
+        Box::new(lock_keyboard::LockKeyboard),
+        Box::new(microphone::Microphone),
+        Box::new(night_light::NightLight),
+        Box::new(screen_saver::ScreenSaver),
+        Box::new(bluetooth::Bluetooth),
     ];
     // BUTTON_FAIL is a debug-only feature (M-6), so only debug builds
     // rebuild the vec.
@@ -105,6 +119,22 @@ impl Switch for FailOnApply {
 
     fn target_on(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
         self.inner.target_on(before, ctx)
+    }
+
+    fn target_off(&self, current: &serde_json::Value, ctx: &Ctx) -> Option<serde_json::Value> {
+        self.inner.target_off(current, ctx)
+    }
+
+    fn probe(&self) -> Result<(), String> {
+        self.inner.probe()
+    }
+
+    fn is_action(&self) -> bool {
+        self.inner.is_action()
+    }
+
+    fn recording_target(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
+        self.inner.recording_target(before, ctx)
     }
 
     fn apply(&self, _value: &serde_json::Value) -> Result<(), SwitchError> {
@@ -178,6 +208,10 @@ pub struct Ctx {
     pub backdrop_color: String,
     pub own_pid: u32,
     pub own_exe: String,
+    /// Whether the keep-awake request should keep the display on too.
+    /// Recording Mode passes true (D-069); manual switch use passes
+    /// `!settings.keepAwake.allow_display_off` (D-081).
+    pub keep_awake_display: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -217,6 +251,34 @@ pub trait Switch: Send + Sync {
     }
 
     fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value;
+
+    /// The "off" value when nothing was recorded (task 4.2: turning a
+    /// switch off with no journal entry and no manual record). `None` means
+    /// the switch cannot compute a safe off state from the current value
+    /// alone (other-apps, tray-icons).
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Read-only startup probe for experimental switches (spec 7.6). Runs
+    /// once at launch; a failure disables the switch with this reason
+    /// (FR-35). Must never change state.
+    fn probe(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Actions are fire-once triggers with no on/off state to restore
+    /// (screen-saver). Never journaled, never timed.
+    fn is_action(&self) -> bool {
+        false
+    }
+
+    /// What Recording Mode turns this switch to (task 4.9): the target when
+    /// "on" is not what a session wants. Only Night Light overrides it
+    /// (D-080: turn it off for true colours).
+    fn recording_target(&self, before: &serde_json::Value, ctx: &Ctx) -> serde_json::Value {
+        self.target_on(before, ctx)
+    }
 
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError>;
 

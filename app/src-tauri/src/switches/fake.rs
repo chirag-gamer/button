@@ -20,6 +20,14 @@ pub struct FakeOptions {
     pub fail_apply: bool,
     pub fail_restore: bool,
     pub panic_at: Option<PanicAt>,
+    /// probe() fails (FR-35 tests).
+    pub fail_probe: bool,
+    /// experimental() returns true, so run_probes() probes this fake.
+    pub experimental: bool,
+    /// target_off returns Some(false) instead of the default None.
+    pub has_target_off: bool,
+    /// is_action() returns true (screen-saver-like).
+    pub is_action: bool,
 }
 
 /// Where a fake should panic: at call N, before or after its mutation.
@@ -37,6 +45,10 @@ impl Default for FakeOptions {
             fail_apply: false,
             fail_restore: false,
             panic_at: None,
+            fail_probe: false,
+            experimental: false,
+            has_target_off: false,
+            is_action: false,
         }
     }
 }
@@ -44,6 +56,7 @@ impl Default for FakeOptions {
 struct Inner {
     on: bool,
     calls: usize,
+    reads: usize,
 }
 
 pub struct FakeSwitch {
@@ -68,6 +81,11 @@ impl FakeHandle {
     pub fn set(&self, on: bool) {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).on = on;
     }
+
+    /// How many times read() ran (task 4.2: the ticker must do zero reads).
+    pub fn read_count(&self) -> usize {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).reads
+    }
 }
 
 impl FakeSwitch {
@@ -80,6 +98,7 @@ impl FakeSwitch {
             inner: Arc::new(Mutex::new(Inner {
                 on: false,
                 calls: 0,
+                reads: 0,
             })),
         }
     }
@@ -96,7 +115,11 @@ impl FakeSwitch {
                 ..FakeOptions::default()
             },
             state_file: Some(state_file),
-            inner: Arc::new(Mutex::new(Inner { on, calls: 0 })),
+            inner: Arc::new(Mutex::new(Inner {
+                on,
+                calls: 0,
+                reads: 0,
+            })),
         }
     }
 
@@ -147,6 +170,10 @@ impl Switch for FakeSwitch {
         self.id
     }
 
+    fn experimental(&self) -> bool {
+        self.options.experimental
+    }
+
     fn availability(&self, _os: &OsInfo) -> Availability {
         self.options.availability
     }
@@ -158,6 +185,7 @@ impl Switch for FakeSwitch {
     fn read(&self) -> Result<serde_json::Value, SwitchError> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.calls += 1;
+        inner.reads += 1;
         if self.should_panic(&inner) {
             panic!("FakeSwitch {} panicked at call {}", self.id, inner.calls);
         }
@@ -166,6 +194,22 @@ impl Switch for FakeSwitch {
 
     fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value {
         json!(true)
+    }
+
+    fn target_off(&self, _current: &serde_json::Value, _ctx: &Ctx) -> Option<serde_json::Value> {
+        self.options.has_target_off.then_some(json!(false))
+    }
+
+    fn probe(&self) -> Result<(), String> {
+        if self.options.fail_probe {
+            Err("fake probe failure".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_action(&self) -> bool {
+        self.options.is_action
     }
 
     fn apply(&self, value: &serde_json::Value) -> Result<(), SwitchError> {
