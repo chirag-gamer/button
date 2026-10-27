@@ -176,13 +176,11 @@ function row(s: AppState["switches"][number]): HTMLElement {
   if (s.availability !== "available") rowEl.classList.add("unavailable");
   if (isAction(s.id) || s.id === "keep-awake") rowEl.classList.add("wide");
 
-  // Keyboard reachable + announced (spec 10): the row is the toggle.
-  const actionable = s.availability === "available";
-  rowEl.tabIndex = actionable ? 0 : -1;
-  rowEl.setAttribute("role", isAction(s.id) ? "button" : "switch");
-  if (!isAction(s.id)) {
-    rowEl.setAttribute("aria-checked", String(s.on));
-  }
+  // ARIA: role=switch/button on the row would fold every child (badges,
+  // chips, the "⋯" menu) into the widget and hide it from screen readers,
+  // so the row is only a labelled group; the toggle semantics live on the
+  // dot/Start control at the row's end (spec 10).
+  rowEl.setAttribute("role", "group");
   rowEl.setAttribute("aria-label", LABELS[s.id]);
 
   const name = document.createElement("span");
@@ -206,20 +204,10 @@ function row(s: AppState["switches"][number]): HTMLElement {
     }
   }
 
-  // Clicking a row toggles it (FR-27). Keep Awake's plain click uses the
-  // default duration (D-081); actions fire their trigger. Space/Enter do
-  // the same for keyboard users (spec 10).
+  // Clicking anywhere on the row toggles it (FR-27). Keep Awake's plain
+  // click uses the default duration (D-081); actions fire their trigger.
   rowEl.addEventListener("click", () => {
     void toggleRow(s);
-  });
-  rowEl.addEventListener("keydown", (e: KeyboardEvent) => {
-    // Only when the row itself has focus: Enter/Space on a nested control
-    // (menu item, "⋯", chip, checkbox) must activate that control.
-    if (e.target !== rowEl) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      void toggleRow(s);
-    }
   });
 
   if (s.availability === "available" && !isAction(s.id)) {
@@ -238,12 +226,36 @@ function row(s: AppState["switches"][number]): HTMLElement {
     rowEl.append(extendChips(s));
   }
 
+  // The dedicated toggle control: keyboard-focusable, Enter/Space native.
+  const actionable = s.availability === "available";
   if (s.id === "screen-saver") {
-    rowEl.append(badge("Start"));
+    const start = document.createElement("button");
+    start.className = "badge start";
+    start.textContent = "Start";
+    if (actionable) {
+      start.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void toggleRow(s);
+      });
+    } else {
+      start.disabled = true;
+    }
+    rowEl.append(start);
   } else {
-    const dot = document.createElement("span");
+    const dot = document.createElement("button");
     dot.className = s.on ? "state on" : "state";
-    rowEl.title = isAction(s.id) ? "" : s.on ? "Turn off" : "Turn on";
+    if (actionable) {
+      dot.setAttribute("role", "switch");
+      dot.setAttribute("aria-checked", String(s.on));
+      dot.setAttribute("aria-label", s.on ? "Turn off" : "Turn on");
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation(); // the row's click handler would double-fire
+        void toggleRow(s);
+      });
+    } else {
+      dot.disabled = true;
+      dot.setAttribute("aria-label", "Unavailable");
+    }
     rowEl.append(dot);
   }
   return rowEl;

@@ -81,13 +81,20 @@ pub fn set_app(app: tauri::AppHandle) {
 /// the UI.
 pub fn unlock() {
     #[cfg(not(test))]
-    if let Some(handle) = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        unsafe {
-            let _ = PostThreadMessageW(handle.tid, WM_QUIT, WPARAM(0), LPARAM(0));
+    {
+        // The take is bound in its own `let` on purpose: a MutexGuard
+        // temporary in an if-let scrutinee lives through the whole block
+        // (verified empirically, edition 2024), which would deadlock the
+        // hook thread's exit-path lock() for the full 500 ms wait.
+        let handle = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(handle) = handle {
+            unsafe {
+                let _ = PostThreadMessageW(handle.tid, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+            let _ = handle
+                .done
+                .recv_timeout(std::time::Duration::from_millis(500));
         }
-        let _ = handle
-            .done
-            .recv_timeout(std::time::Duration::from_millis(500));
     }
     #[cfg(test)]
     {
@@ -269,7 +276,17 @@ fn hook_thread(
     {
         let for_closure = app.clone();
         let _ = app.run_on_main_thread(move || {
-            if let Some(window) = for_closure.get_webview_window("lock") {
+            // Re-check INSIDE the closure: the queue-time check above races
+            // a lock installed while this closure waited in the main
+            // thread's queue. Ownership is held across check+destroy, and
+            // the new lock installs its handle before any overlay exists,
+            // so seeing None/own tid here means no newer overlay can be
+            // under construction — destroy is safe.
+            let newer_installed = {
+                let slot = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner());
+                matches!(*slot, Some(ref handle) if handle.tid != tid)
+            };
+            if !newer_installed && let Some(window) = for_closure.get_webview_window("lock") {
                 let _ = window.destroy();
             }
         });

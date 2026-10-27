@@ -1,0 +1,37 @@
+/* Lock overlay styles (FR-34, spec 7.10), linked from lock.html so the
+   CSP needs no 'unsafe-inline' for styles (D-082). */
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: #1f1f1f;
+  color: #f2f2f2;
+}
+.lock-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+}
+.lock-panel p {
+  margin: 0;
+  font-size: 14px;
+  text-align: center;
+}
+button {
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: #4f6ef7;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}

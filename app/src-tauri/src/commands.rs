@@ -26,13 +26,14 @@ pub enum IpcError {
 
 type IpcResult<T> = Result<T, IpcError>;
 
-/// Maps a dispatcher failure to its IPC code (spec 6.1). Matched on the
-/// lowercased message so dispatcher and engine casings both map.
-fn map_error(message: String) -> IpcError {
-    match message.to_lowercase().as_str() {
-        "a session is already active" => IpcError::SessionActive(message),
-        "no session is active" => IpcError::NoSession(message),
-        _ => IpcError::NotAvailable(message),
+/// Maps a dispatcher failure to its IPC code (spec 6.1) by variant — the
+/// old version lowercased and matched the error prose, so any wording
+/// change silently demoted SESSION_ACTIVE/NO_SESSION to NOT_AVAILABLE.
+fn map_error(e: automation::DispatchError) -> IpcError {
+    match e {
+        automation::DispatchError::SessionActive => IpcError::SessionActive(e.to_string()),
+        automation::DispatchError::NoSession => IpcError::NoSession(e.to_string()),
+        automation::DispatchError::Failed(message) => IpcError::NotAvailable(message),
     }
 }
 
@@ -183,4 +184,25 @@ fn save_settings(
         .app_local_data_dir()
         .map_err(|e| IpcError::OsError(e.to_string()))?;
     crate::settings::save(candidate, &dir).map_err(|e| IpcError::OsError(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_errors_map_to_the_spec_codes() {
+        assert!(matches!(
+            map_error(automation::DispatchError::SessionActive),
+            IpcError::SessionActive(_)
+        ));
+        assert!(matches!(
+            map_error(automation::DispatchError::NoSession),
+            IpcError::NoSession(_)
+        ));
+        assert!(matches!(
+            map_error(automation::DispatchError::Failed("x".into())),
+            IpcError::NotAvailable(_)
+        ));
+    }
 }

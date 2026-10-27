@@ -6,18 +6,7 @@
     <!-- Empty data icon: stops the webview's automatic /favicon.ico
          request, which the asset resolver logs as an error. -->
     <link rel="icon" href="data:," />
-    <style>
-      /* The colour comes from the window layer (background_color at
-         creation); the page itself stays transparent so it shows
-         through. Nothing interactive lives here (spec 7.9). */
-      html,
-      body {
-        background: transparent;
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-      }
-    </style>
+    <link rel="stylesheet" href="/src/overlays/backdrop.css" />
   </head>
   <body></body>
 </html>

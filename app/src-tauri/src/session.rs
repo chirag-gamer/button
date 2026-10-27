@@ -855,6 +855,12 @@ impl SessionEngine {
         let mut report = RecoveryReport::default();
         match journal::read(&self.data_dir) {
             JournalRead::Missing => {}
+            JournalRead::Io(e) => {
+                // Locked/unreadable, not corrupt (spec 7.3): skip recovery,
+                // leave the file for the next launch — the app layer's
+                // existing catch logs it and keeps booting.
+                return Err(SessionError::Io(e));
+            }
             JournalRead::Corrupt => {
                 report.corrupted = true;
                 journal::quarantine_corrupt(&self.data_dir, now)?;
@@ -1057,6 +1063,7 @@ mod tests {
             JournalRead::Ok(j) => j.entries.len(),
             JournalRead::Missing => 0,
             JournalRead::Corrupt => panic!("journal corrupt"),
+            JournalRead::Io(_) => panic!("journal unreadable"),
         }
     }
 

@@ -36,7 +36,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "start-restore" => {
                 if let Err(message) = automation::run(app, Action::Toggle) {
-                    automation::notify(app, &message);
+                    automation::notify(app, &message.to_string());
                 }
             }
             "quit" => app.exit(0),
@@ -66,7 +66,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                 ..
             } => {
                 if let Err(message) = automation::run(tray.app_handle(), Action::Toggle) {
-                    automation::notify(tray.app_handle(), &message);
+                    automation::notify(tray.app_handle(), &message.to_string());
                 }
             }
             _ => {}
@@ -144,6 +144,12 @@ pub fn start_ticker(app: AppHandle) {
             let active = b.engine.state().status == SessionStatus::Active;
             let timers = b.engine.has_timers();
             if active || timers {
+                // fire_due_timers runs OS restores under the SharedState
+                // lock: a slow restore (Bluetooth KsProperty) briefly
+                // blocks IPC/tray. Deliberate: start/stop/set_switch hold
+                // the same lock across their OS work, and the per-entry
+                // restore+journal-write interleaving (spec 7.2) assumes the
+                // engine is locked. Latency-only, no correctness impact.
                 b.engine.fire_due_timers(time::OffsetDateTime::now_utc());
             }
             drop(b);

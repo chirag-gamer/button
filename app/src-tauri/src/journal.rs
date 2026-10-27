@@ -62,6 +62,11 @@ pub enum JournalRead {
     Ok(Box<Journal>),
     /// The file exists but doesn't parse.
     Corrupt,
+    /// The file exists but could not be read (e.g. locked by antivirus or
+    /// a backup). Never quarantined: it may be a perfectly good journal —
+    /// spec 7.3's quarantine path covers only "doesn't parse". The caller
+    /// skips recovery and leaves the file for the next launch.
+    Io(std::io::Error),
 }
 
 const JOURNAL_FILE: &str = "journal.json";
@@ -78,7 +83,10 @@ pub fn read(data_dir: &std::path::Path) -> JournalRead {
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return JournalRead::Missing,
-        Err(e) => panic!("reading {}: {e}", path.display()),
+        // A locked/unreadable file is not corruption: report it and let
+        // the caller skip recovery instead of panicking at launch (the
+        // read used to panic here, before the panic hook existed).
+        Err(e) => return JournalRead::Io(e),
     };
     match serde_json::from_slice::<Journal>(&bytes) {
         Ok(journal) => JournalRead::Ok(Box::new(journal)),
@@ -173,6 +181,19 @@ mod tests {
         assert!(matches!(read(&dir), JournalRead::Missing));
         // delete() on a missing journal is a no-op.
         delete(&dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_journal_reads_as_io_not_a_panic() {
+        // A directory where the file should be makes fs::read fail with a
+        // non-NotFound error (verified on Windows: Access denied, os 5) —
+        // the old read() panicked here, before the panic hook existed.
+        let dir = test_dir("unreadable");
+        fs::create_dir_all(dir.join(JOURNAL_FILE)).unwrap();
+        match read(&dir) {
+            JournalRead::Io(e) => assert_ne!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 
     #[test]

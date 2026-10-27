@@ -164,7 +164,7 @@ pub const RECORDING_ORDER: [SwitchId; 10] = [
 ];
 
 /// Kebab-case display, same as the serde name (used for log lines and the
-/// fake-switches.json keys).
+/// CLI's switch ids).
 impl std::fmt::Display for SwitchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {

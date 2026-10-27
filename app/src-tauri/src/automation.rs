@@ -148,36 +148,65 @@ pub fn refresh_switches(app: &AppHandle) {
     after_change(app);
 }
 
-pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
-    let state = app.state::<SharedState>();
+/// Dispatcher failures; commands.rs maps these onto the spec 6.1 codes
+/// (replaces matching the error prose by string, which drifted silently
+/// into NOT_AVAILABLE on any wording change).
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError {
+    #[error("A session is already active")]
+    SessionActive,
+    #[error("No session is active")]
+    NoSession,
+    #[error("{0}")]
+    Failed(String),
+}
+
+fn dispatch_err(e: crate::session::SessionError) -> DispatchError {
+    match e {
+        crate::session::SessionError::AlreadyActive => DispatchError::SessionActive,
+        crate::session::SessionError::NotActive => DispatchError::NoSession,
+        crate::session::SessionError::Io(e) => DispatchError::Failed(e.to_string()),
+    }
+}
+
+pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
+    // The single-instance callback can arrive during setup, before
+    // ButtonState is managed (registry build + recovery + probes take a
+    // moment; every other caller exists only after setup). Refuse instead
+    // of panicking on the missing state.
+    let Some(state) = app.try_state::<SharedState>() else {
+        let message = "button is still starting; try again in a moment";
+        log::warn!("dispatcher dropped {action:?}: {message}");
+        return Err(DispatchError::Failed(message.into()));
+    };
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
     let now = OffsetDateTime::now_utc();
 
     let active = b.engine.state().status == SessionStatus::Active;
     let selected = b.settings.recording_mode.actions.clone();
     let mut started = false;
-    let result: Result<(), String> = match action {
+    let result: Result<(), DispatchError> = match action {
         Action::Start if !active => {
             let ctx = build_ctx(&b.settings);
             b.engine
                 .start(now, &selected, &ctx)
                 .map(|_| started = true)
-                .map_err(|e| e.to_string())
+                .map_err(dispatch_err)
         }
-        Action::Start => Err(session_active()),
-        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
-        Action::Stop => Err(no_session()),
-        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(|e| e.to_string()),
+        Action::Start => Err(DispatchError::SessionActive),
+        Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
+        Action::Stop => Err(DispatchError::NoSession),
+        Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
         Action::Toggle => {
             let ctx = build_ctx(&b.settings);
             b.engine
                 .start(now, &selected, &ctx)
                 .map(|_| started = true)
-                .map_err(|e| e.to_string())
+                .map_err(dispatch_err)
         }
         Action::ShowDropdown { click } => {
             drop(b);
-            tray::show_dropdown(app, click)?;
+            tray::show_dropdown(app, click).map_err(DispatchError::Failed)?;
             return Ok(());
         }
         Action::Switch { id, on } => {
@@ -189,7 +218,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
             };
             b.engine
                 .set_switch(id, resolved, None, now, &ctx)
-                .map_err(|e| e.to_string())
+                .map_err(|e| DispatchError::Failed(e.to_string()))
         }
         Action::Restore => {
             // Stop the session if one is active, then restore every
@@ -239,14 +268,6 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn session_active() -> String {
-    "A session is already active".into()
-}
-
-fn no_session() -> String {
-    "No session is active".into()
 }
 
 /// Failures and CLI results go to a notification (spec 6.3: button has no

@@ -1,7 +1,6 @@
-//! FakeSwitch: the only "switch" registered in debug builds (D-063, D-033).
+//! FakeSwitch: the test-only switch behind #[cfg(test)] (D-067, D-033).
 //! It never touches Windows. State shape: `{"on": bool}`.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -62,7 +61,6 @@ struct Inner {
 pub struct FakeSwitch {
     id: SwitchId,
     options: FakeOptions,
-    state_file: Option<PathBuf>,
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -94,29 +92,8 @@ impl FakeSwitch {
         Self {
             id,
             options,
-            state_file: None,
             inner: Arc::new(Mutex::new(Inner {
                 on: false,
-                calls: 0,
-                reads: 0,
-            })),
-        }
-    }
-
-    /// Debug-build fake whose persistent state survives restarts in
-    /// `%LOCALAPPDATA%\io.github.chirag-gamer.button\fake-switches.json`.
-    pub fn persistent(id: SwitchId, data_dir: PathBuf) -> Self {
-        let state_file = data_dir.join("fake-switches.json");
-        let on = load_state(&state_file, id).is_some_and(|v| v == json!(true));
-        Self {
-            id,
-            options: FakeOptions {
-                persistent: true,
-                ..FakeOptions::default()
-            },
-            state_file: Some(state_file),
-            inner: Arc::new(Mutex::new(Inner {
-                on,
                 calls: 0,
                 reads: 0,
             })),
@@ -142,27 +119,6 @@ impl FakeSwitch {
     pub fn is_on(&self) -> bool {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).on
     }
-}
-
-fn load_state(path: &PathBuf, id: SwitchId) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
-    map.get(id.to_string().as_str()).cloned()
-}
-
-fn save_state(path: &PathBuf, id: SwitchId, on: bool) {
-    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    map.insert(id.to_string(), json!(on));
-    // Best effort: losing fake state only means a fake switches back to off.
-    // Atomic like the journal: a crash mid-write must not truncate the
-    // saved state of every fake (spec 7.4 protocol).
-    let _ = crate::write_atomic(
-        path,
-        serde_json::to_string(&map).unwrap_or_default().as_bytes(),
-    );
 }
 
 impl Switch for FakeSwitch {
@@ -222,9 +178,6 @@ impl Switch for FakeSwitch {
             return Err(SwitchError::NotAvailable("fake apply failure".into()));
         }
         inner.on = value.as_bool().unwrap_or(false);
-        if let Some(path) = &self.state_file {
-            save_state(path, self.id, inner.on);
-        }
         if self.panic_after_mutation(&inner) {
             panic!(
                 "FakeSwitch {} panicked after apply {}",
@@ -245,9 +198,6 @@ impl Switch for FakeSwitch {
         }
         if inner.on == e.after.as_bool().unwrap_or(false) {
             inner.on = e.before.as_bool().unwrap_or(false);
-            if let Some(path) = &self.state_file {
-                save_state(path, self.id, inner.on);
-            }
             if self.panic_after_mutation(&inner) {
                 panic!(
                     "FakeSwitch {} panicked after restore {}",

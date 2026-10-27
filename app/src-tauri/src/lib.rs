@@ -162,7 +162,7 @@ pub fn run() {
             match automation::parse(&cli_args) {
                 Ok(action) => {
                     if let Err(message) = automation::run(app, action) {
-                        automation::notify(app, &message);
+                        automation::notify(app, &message.to_string());
                     }
                 }
                 Err(message) => automation::notify(app, &message),
@@ -330,7 +330,7 @@ pub fn run() {
                     // becomes the instance and runs the command. It stays
                     // resident so the session (or dropdown) survives.
                     if let Err(message) = automation::run(app.handle(), action) {
-                        automation::notify(app.handle(), &message);
+                        automation::notify(app.handle(), &message.to_string());
                     }
                 }
                 Err(error) => {

@@ -171,6 +171,12 @@ impl Switch for Bluetooth {
     /// Restore addresses the JOURNALED device, not whatever is chosen now —
     /// changing the picker mid-session must not strand the device the
     /// session connected (same rule as microphone's endpointId).
+    ///
+    /// Connecting settles asynchronously (seconds — the code itself
+    /// refreshes rows at +3 s/+8 s), so a mismatch is re-polled briefly
+    /// before declaring the user changed it: turning the switch off right
+    /// after on must still disconnect (round-4 finding). The poll runs
+    /// under the SharedState lock, hence the short ~2 s cap.
     fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
         let before = parse_state::<State>(&e.before, "bluetooth")?;
         let after = parse_state::<State>(&e.after, "bluetooth")?;
@@ -178,17 +184,42 @@ impl Switch for Bluetooth {
             return Ok(RestoreOutcome::Gone);
         };
         let _guard = ComGuard::new()?;
-        let containers = audio_containers()?;
-        let Some(container) = containers.iter().find(|c| c.id == device_id) else {
+        let mut containers = audio_containers()?;
+        let mut container = find_container(&containers, device_id);
+        // (as_ref: is_none_or/is_some_and consume the Option, which would
+        // leave `container` moved-out on the not-taken path.)
+        if container
+            .as_ref()
+            .is_none_or(|c| c.connected != after.connected)
+        {
+            for _ in 0..4 {
+                // 4 x 500 ms: long enough for the early settle window,
+                // short enough for the lock we hold while waiting.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                containers = audio_containers()?;
+                container = find_container(&containers, device_id);
+                if container
+                    .as_ref()
+                    .is_some_and(|c| c.connected == after.connected)
+                {
+                    break;
+                }
+            }
+        }
+        let Some(container) = container else {
             return Ok(RestoreOutcome::Gone); // device no longer known
         };
         if container.connected != after.connected {
+            log::warn!(
+                "bluetooth: connection still settling or user-changed; \
+                 treating {device_id} as user-changed"
+            );
             return Ok(RestoreOutcome::UserChanged);
         }
         if !after.connected {
             return Ok(RestoreOutcome::Restored); // never connected by us
         }
-        set_connection(container, false)?;
+        set_connection(&container, false)?;
         Ok(RestoreOutcome::Restored)
     }
 
@@ -284,11 +315,18 @@ fn schedule_delayed_refresh(app: tauri::AppHandle) {
 /// One Bluetooth audio container (a device): its id (the GUID string the
 /// picker stores), whether any endpoint is ACTIVE, a display-name fallback
 /// from the endpoints, and the IKsControl handles apply talks to.
+#[derive(Clone)]
 struct Container {
     id: String,
     connected: bool,
     endpoint_name: Option<String>,
     ks: Vec<IKsControl>,
+}
+
+/// The container with this id (COM pointers clone as cheap ref-count
+/// bumps), so restore can re-poll without holding a borrow of the walk.
+fn find_container(containers: &[Container], device_id: &str) -> Option<Container> {
+    containers.iter().find(|c| c.id == device_id).cloned()
 }
 
 /// Every render endpoint, grouped by Bluetooth container. Not-present

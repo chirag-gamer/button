@@ -22,7 +22,7 @@ pub fn register_toggle(app: &AppHandle, binding: &str) -> bool {
             if event.state == ShortcutState::Pressed
                 && let Err(message) = automation::run(app, Action::Toggle)
             {
-                automation::notify(app, &message);
+                automation::notify(app, &message.to_string());
             }
         });
     match result {

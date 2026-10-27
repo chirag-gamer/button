@@ -245,3 +245,39 @@ button.link {
   top: auto;
   bottom: calc(100% - 2px);
 }
+
+/* The state dot and the screen-saver Start badge are real buttons (the
+   row's role=group must not fold them away): reset their agent styles and
+   give them a focus ring and a padded hit area. */
+
+.row .state,
+.row .badge.start {
+  border: 0;
+  padding: 6px;
+  margin: -6px;
+  cursor: pointer;
+}
+
+/* The dot keeps its own fill from .row .state / .row .state.on above; only
+   the badge needs the transparent button reset. */
+.row .badge.start {
+  margin: 0;
+  padding: 1px 5px;
+  background: none;
+}
+
+.row .state:disabled,
+.row .badge.start:disabled {
+  cursor: default;
+}
+
+.row .state:focus-visible,
+.row .badge.start:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+
+.row .badge.start:focus-visible {
+  border-radius: 4px;
+}
