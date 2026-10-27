@@ -21,8 +21,8 @@ pub enum Action {
     ShowDropdown {
         click: Option<crate::position::ClickRect>,
     },
-    /// `button.exe switch <id> on|off|toggle`. Quick switches arrive in
-    /// Phase 4; until then every switch reports NotBuilt (FR-27, FR-28).
+    /// `button.exe switch <id> on|off|toggle`: one quick switch through the
+    /// same engine path as the dropdown (FR-27, spec 6.3).
     Switch {
         id: SwitchId,
         on: SwitchOnOff,
@@ -197,8 +197,11 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
             // recovery while the app runs: it would drop non-persistent
             // entries like keep-awake (spec 7.3 vs 7.2, task 4.2).
             let summary = match b.engine.restore_all_now(now) {
-                Ok(()) if active => "Recording Mode ended".to_string(),
-                Ok(()) => "Everything button still owned was restored".to_string(),
+                Ok(0) if active => "Recording Mode ended".to_string(),
+                Ok(0) => "Everything button still owned was restored".to_string(),
+                Ok(failed) => format!(
+                    "Restored everything else, but {failed} switch(es) could not be restored"
+                ),
                 Err(e) => format!("Restore failed: {e}"),
             };
             notify(app, &summary);
@@ -217,17 +220,23 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), String> {
         tray::hide_dropdown(app);
     }
     // Summary when the last run left failures behind (apply or restore,
-    // spec 7.1.4 / 7.2).
-    let state = app.state::<SharedState>();
-    let b = state.lock().unwrap_or_else(|p| p.into_inner());
-    let failed = b.engine.state().failed.len();
-    let idle = b.engine.state().status == SessionStatus::Idle;
-    drop(b);
-    if idle && failed > 0 {
-        notify(
-            app,
-            &format!("{failed} switch(es) failed during the last run"),
-        );
+    // spec 7.1.4 / 7.2). Only the session actions own this summary; a quick
+    // switch must not re-announce an old session's failures.
+    if matches!(
+        action,
+        Action::Start | Action::Stop | Action::Toggle | Action::Restore
+    ) {
+        let state = app.state::<SharedState>();
+        let b = state.lock().unwrap_or_else(|p| p.into_inner());
+        let failed = b.engine.state().failed.len();
+        let idle = b.engine.state().status == SessionStatus::Idle;
+        drop(b);
+        if idle && failed > 0 {
+            notify(
+                app,
+                &format!("{failed} switch(es) failed during the last run"),
+            );
+        }
     }
     Ok(())
 }

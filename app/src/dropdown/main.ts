@@ -137,6 +137,11 @@ function render(): void {
   summary.textContent = `${on} on · ${counted.length - on} off`;
   summary.hidden = counted.length === 0;
 
+  // An open menu must survive the once-a-second state-changed re-render
+  // (replaceChildren would destroy the row it lives in); the shelves
+  // rebuild on the next event after it closes.
+  if (openMenu) return;
+
   // Shelves (FR-44): shown, "Show all", hidden.
   const byId = new Map(state.switches.map((s) => [s.id, s]));
   renderShelf(shelf, settings.dropdown.shown, byId);
@@ -160,9 +165,9 @@ function renderShelf(
 }
 
 function isAction(id: SwitchId): boolean {
-  // Actions have no on/off state: the engine marks screen-saver; the lock
-  // row's click means "lock now" in the same way.
-  return id === "screen-saver" || id === "lock-keyboard";
+  // Screen saver is the only engine action: it fires once, no on/off state.
+  // Lock keyboard is a real toggle (click while locked unlocks it).
+  return id === "screen-saver";
 }
 
 function row(s: AppState["switches"][number]): HTMLElement {
@@ -170,6 +175,15 @@ function row(s: AppState["switches"][number]): HTMLElement {
   rowEl.className = "row";
   if (s.availability !== "available") rowEl.classList.add("unavailable");
   if (isAction(s.id) || s.id === "keep-awake") rowEl.classList.add("wide");
+
+  // Keyboard reachable + announced (spec 10): the row is the toggle.
+  const actionable = s.availability === "available";
+  rowEl.tabIndex = actionable ? 0 : -1;
+  rowEl.setAttribute("role", isAction(s.id) ? "button" : "switch");
+  if (!isAction(s.id)) {
+    rowEl.setAttribute("aria-checked", String(s.on));
+  }
+  rowEl.setAttribute("aria-label", LABELS[s.id]);
 
   const name = document.createElement("span");
   name.className = "name";
@@ -193,9 +207,19 @@ function row(s: AppState["switches"][number]): HTMLElement {
   }
 
   // Clicking a row toggles it (FR-27). Keep Awake's plain click uses the
-  // default duration (D-081); actions fire their trigger.
+  // default duration (D-081); actions fire their trigger. Space/Enter do
+  // the same for keyboard users (spec 10).
   rowEl.addEventListener("click", () => {
     void toggleRow(s);
+  });
+  rowEl.addEventListener("keydown", (e: KeyboardEvent) => {
+    // Only when the row itself has focus: Enter/Space on a nested control
+    // (menu item, "⋯", chip, checkbox) must activate that control.
+    if (e.target !== rowEl) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      void toggleRow(s);
+    }
   });
 
   if (s.availability === "available" && !isAction(s.id)) {
@@ -288,8 +312,29 @@ function openRowMenu(rowEl: HTMLElement, s: AppState["switches"][number]): void 
   closeMenu();
   const menu = document.createElement("div");
   menu.className = "menu";
+  // The menu lives inside the clickable row: without this, every item
+  // click bubbles on and also toggles the switch.
+  menu.addEventListener("click", (e) => e.stopPropagation());
+  // Open upward when the row sits low, so the menu is not clipped.
+  const shelf = rowEl.parentElement;
+  if (shelf && rowEl.offsetTop > shelf.offsetHeight / 2) {
+    menu.classList.add("up");
+  }
   if (s.id === "bluetooth") {
     fillBtPicker(menu);
+    // The cached list can be stale (paired since the dropdown opened):
+    // re-query and refill while it is open.
+    void listBtDevices()
+      .then((devices) => {
+        btDevices = devices;
+        if (openMenu === menu) {
+          menu.replaceChildren();
+          fillBtPicker(menu);
+        }
+      })
+      .catch(() => {
+        /* keep the cached list; errors surface on the toggle click */
+      });
   } else {
     const presets = s.id === "keep-awake" ? KEEP_AWAKE_PRESETS : TIMER_PRESETS;
     for (const preset of presets) {
@@ -398,9 +443,20 @@ showAllButton.addEventListener("click", () => {
   render();
 });
 
-// Escape closes the dropdown like a blur would.
+// Blur hides the whole dropdown (tray.rs): close any open menu too, or
+// the render guard keeps the shelves frozen on stale state after reopen.
+window.addEventListener("blur", () => closeMenu());
+
+// Escape closes an open menu first; only a second Escape hides the
+// dropdown (standard popover behaviour, spec 10).
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") void getCurrentWindow().hide();
+  if (e.key === "Escape") {
+    if (openMenu) {
+      closeMenu();
+      return;
+    }
+    void getCurrentWindow().hide();
+  }
 });
 
 Promise.all([getState(), getSettings(), listBtDevices().catch(() => [])]).then(

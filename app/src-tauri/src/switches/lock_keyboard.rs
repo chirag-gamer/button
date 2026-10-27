@@ -10,6 +10,7 @@
 //! button exits, the keyboard works again (the hook dies with the process).
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(test))]
 use std::sync::Mutex;
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -36,9 +37,19 @@ use crate::os::OsInfo;
 #[cfg(not(test))]
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static LOCKED: AtomicBool = AtomicBool::new(false);
-/// The hook thread's id while a lock is installed; WM_QUIT is posted here
-/// to unlock. Never joined: the thread finishes by itself.
-static HOOK_THREAD: Mutex<Option<u32>> = Mutex::new(None);
+
+/// The live lock, owned by the hook thread alone: it fills the slot when
+/// the hook is installed (before signalling readiness) and clears it on
+/// exit, so an Esc pressed in between can never race a stale write-back.
+/// `done` closes when the thread has finished unlocking.
+#[cfg(not(test))]
+struct HookHandle {
+    tid: u32,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(not(test))]
+static HOOK_THREAD: Mutex<Option<HookHandle>> = Mutex::new(None);
 
 /// The overlay and the post-unlock refresh need window access (D-074's
 /// cfg split applies to everything below that touches Tauri windows).
@@ -64,20 +75,23 @@ pub fn set_app(app: tauri::AppHandle) {
 }
 
 /// Unlock now (the IPC command, or the overlay's Unlock button): post
-/// WM_QUIT to the hook thread; it unhooks, clears the flag, destroys the
-/// overlay and refreshes the UI.
+/// WM_QUIT to the hook thread and wait (bounded) for its cleanup, so a
+/// quick re-lock cannot hit the stale `LOCKED` idempotence check. The
+/// thread unhooks, clears the flag, destroys the overlay and refreshes
+/// the UI.
 pub fn unlock() {
-    let tid = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()).take();
     #[cfg(not(test))]
-    if let Some(tid) = tid {
+    if let Some(handle) = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()).take() {
         unsafe {
-            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+            let _ = PostThreadMessageW(handle.tid, WM_QUIT, WPARAM(0), LPARAM(0));
         }
+        let _ = handle
+            .done
+            .recv_timeout(std::time::Duration::from_millis(500));
     }
     #[cfg(test)]
     {
         // Test builds carry no hook thread (D-074); the flag is the state.
-        let _ = tid;
         LOCKED.store(false, Ordering::SeqCst);
     }
 }
@@ -156,19 +170,17 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 fn lock() -> Result<(), SwitchError> {
     let (tx, rx) = std::sync::mpsc::channel();
     let app = APP.get().cloned();
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("lock-keyboard".into())
-        .spawn(move || hook_thread(app, tx));
-    let _ = spawned.map_err(|e| SwitchError::Os {
-        api: "CreateThread(lock-keyboard)",
-        code: e.raw_os_error().unwrap_or(-1),
-    })?;
+        .spawn(move || hook_thread(app, tx))
+        .map_err(|e| SwitchError::Os {
+            api: "CreateThread(lock-keyboard)",
+            code: e.raw_os_error().unwrap_or(-1),
+        })?;
+    // The thread owns HOOK_THREAD/LOCKED by the time it signals readiness;
+    // the parent only relays the outcome.
     match rx.recv() {
-        Ok(Ok(tid)) => {
-            *HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()) = Some(tid);
-            LOCKED.store(true, Ordering::SeqCst);
-            Ok(())
-        }
+        Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(SwitchError::NotAvailable(
             "lock-keyboard thread is gone".into(),
@@ -185,48 +197,76 @@ fn lock() -> Result<(), SwitchError> {
 }
 
 /// The lock's own thread: message queue, hook, overlay, message loop. On
-/// WM_QUIT (Esc or the Unlock button): unhook, clear the flag, destroy the
-/// overlay, refresh the UI.
+/// WM_QUIT (Esc or the Unlock button): unhook, clear the state it owns,
+/// destroy the overlay, refresh the UI, and close the done channel.
 #[cfg(not(test))]
 fn hook_thread(
     app: Option<tauri::AppHandle>,
-    tx: std::sync::mpsc::Sender<Result<u32, SwitchError>>,
+    tx: std::sync::mpsc::Sender<Result<(), SwitchError>>,
 ) {
+    // Create the message queue first, so the hook can post to it
+    // (probe pattern, 2026-10-27).
+    let mut msg = MSG::default();
     unsafe {
-        // Create the message queue first, so the hook can post to it
-        // (probe pattern, 2026-10-27).
-        let mut msg = MSG::default();
         let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
-        let hmod = GetModuleHandleW(None)
-            .ok()
-            .map(|m| HINSTANCE(m.0))
-            .unwrap_or_default();
-        let Ok(hook) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(hmod), 0) else {
-            let _ = tx.send(Err(SwitchError::Os {
-                api: "SetWindowsHookExW(WH_KEYBOARD_LL)",
-                code: 0,
-            }));
-            return;
+    }
+    let hmod = unsafe { GetModuleHandleW(None) }
+        .ok()
+        .map(|m| HINSTANCE(m.0))
+        .unwrap_or_default();
+    let hook =
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), Some(hmod), 0) } {
+            Ok(hook) => hook,
+            Err(e) => {
+                let _ = tx.send(Err(SwitchError::Os {
+                    api: "SetWindowsHookExW(WH_KEYBOARD_LL)",
+                    code: e.code().0,
+                }));
+                return;
+            }
         };
 
-        // The overlay is a convenience; a failed build must not stop the
-        // lock (Esc still unlocks).
-        if let Some(app) = &app
-            && let Err(e) = build_overlay(app)
-        {
-            log::warn!("lock-keyboard: overlay failed: {e}");
-        }
+    // Own the state BEFORE signalling readiness: an Esc pressed the instant
+    // the hook is live must not race the parent's bookkeeping (review
+    // finding: the parent used to write these after the handshake).
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    *HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()) =
+        Some(HookHandle { tid, done: done_rx });
+    LOCKED.store(true, Ordering::SeqCst);
 
-        let _ = tx.send(Ok(windows::Win32::System::Threading::GetCurrentThreadId()));
+    // The overlay is a convenience; a failed build must not stop the
+    // lock (Esc still unlocks).
+    if let Some(app) = &app
+        && let Err(e) = build_overlay(app)
+    {
+        log::warn!("lock-keyboard: overlay failed: {e}");
+    }
+
+    let _ = tx.send(Ok(()));
+    unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
         let _ = UnhookWindowsHookEx(hook);
     }
-    LOCKED.store(false, Ordering::SeqCst);
-    *HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    if let Some(app) = &app {
+    // A wedged thread that outlives unlock()'s 500 ms wait must not wipe a
+    // NEWER lock's state or overlay: touch anything only when the installed
+    // handle is still ours (or gone, i.e. unlock() already took it).
+    let newer_lock_installed = {
+        let mut slot = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner());
+        let newer = matches!(*slot, Some(ref handle) if handle.tid != tid);
+        if !newer {
+            *slot = None;
+            LOCKED.store(false, Ordering::SeqCst);
+        }
+        newer
+    };
+    let _ = done_tx.send(());
+    if let Some(app) = &app
+        && !newer_lock_installed
+    {
         let for_closure = app.clone();
         let _ = app.run_on_main_thread(move || {
             if let Some(window) = for_closure.get_webview_window("lock") {
@@ -271,27 +311,22 @@ mod tests {
         assert!(parse_state::<State>(&serde_json::json!({}), "t").is_err());
     }
 
+    /// One test owns the LOCKED static from start to end (cargo test runs
+    /// the module's tests in parallel threads; two writers race).
     #[test]
-    fn lock_unlock_round_trip_through_the_trait() {
+    fn lock_unlock_round_trip_and_double_calls_are_no_ops() {
         // Test builds stub the hook away (D-074); the state machine is
-        // still exercised through apply/read.
+        // still exercised through apply/read/unlock.
         LockKeyboard
             .apply(&serde_json::json!(State { locked: true }))
             .unwrap();
         assert!(LockKeyboard.is_on(&LockKeyboard.read().unwrap()));
+        // Double lock is a no-op, double unlock too.
+        LockKeyboard
+            .apply(&serde_json::json!(State { locked: true }))
+            .unwrap();
         LockKeyboard
             .apply(&serde_json::json!(State { locked: false }))
-            .unwrap();
-        assert!(!LockKeyboard.is_on(&LockKeyboard.read().unwrap()));
-    }
-
-    #[test]
-    fn double_lock_and_double_unlock_are_no_ops() {
-        LockKeyboard
-            .apply(&serde_json::json!(State { locked: true }))
-            .unwrap();
-        LockKeyboard
-            .apply(&serde_json::json!(State { locked: true }))
             .unwrap();
         unlock();
         unlock();

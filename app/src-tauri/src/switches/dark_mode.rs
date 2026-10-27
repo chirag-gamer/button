@@ -46,10 +46,19 @@ impl Switch for DarkMode {
     }
 
     fn read(&self) -> Result<serde_json::Value, SwitchError> {
-        let key = windows_registry::CURRENT_USER
-            .open(PERSONALIZE)
-            .map_err(reg("open Themes\\Personalize"))?;
-        // Missing values mean light (spec 7.5, task 4.3).
+        let key = match windows_registry::CURRENT_USER.open(PERSONALIZE) {
+            Ok(key) => key,
+            // The key has never been created: the themes are light, same
+            // rule as a missing value one level down (spec 7.5, task 4.3).
+            // 0x80070002 = ERROR_FILE_NOT_FOUND as HRESULT.
+            Err(e) if e.code().0 as u32 == 0x8007_0002 => {
+                return Ok(serde_json::json!(State {
+                    apps: Theme::Light,
+                    system: Theme::Light,
+                }));
+            }
+            Err(e) => return Err(reg("open Themes\\Personalize")(e)),
+        };
         let apps = read_theme(&key, "AppsUseLightTheme")?;
         let system = read_theme(&key, "SystemUsesLightTheme")?;
         Ok(serde_json::json!(State { apps, system }))
@@ -80,10 +89,25 @@ impl Switch for DarkMode {
         let key = windows_registry::CURRENT_USER
             .create(PERSONALIZE)
             .map_err(reg("create Themes\\Personalize"))?;
+        // Capture the prior value so a failed second write can put the
+        // first one back (alert_sounds' rollback rule): a half-dark theme
+        // with no journal entry must not survive an error.
+        let prior_apps = key.get_u32("AppsUseLightTheme").ok();
         key.set_u32("AppsUseLightTheme", light_u32(target.apps))
             .map_err(reg("set AppsUseLightTheme"))?;
-        key.set_u32("SystemUsesLightTheme", light_u32(target.system))
-            .map_err(reg("set SystemUsesLightTheme"))?;
+        if let Err(e) = key.set_u32("SystemUsesLightTheme", light_u32(target.system)) {
+            match prior_apps {
+                Some(prior) => {
+                    let _ = key.set_u32("AppsUseLightTheme", prior);
+                }
+                // No prior value existed: remove what we just wrote, so
+                // read() sees "missing = light" again — the exact prior.
+                None => {
+                    let _ = key.remove_value("AppsUseLightTheme");
+                }
+            }
+            return Err(reg("set SystemUsesLightTheme")(e));
+        }
         broadcast_immersive_color_set();
         Ok(())
     }

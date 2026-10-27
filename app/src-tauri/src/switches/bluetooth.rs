@@ -41,8 +41,9 @@ use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, S
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::{GUID, Interface, PCWSTR, PWSTR};
 
-use super::{Availability, Ctx, Switch, SwitchError, SwitchId, parse_state};
+use super::{Availability, Ctx, RestoreOutcome, Switch, SwitchError, SwitchId, parse_state};
 use crate::com::ComGuard;
+use crate::journal::JournalEntry;
 use crate::os::OsInfo;
 
 /// Battery level on any BTHENUM node of the container (BtBatteryTray prior
@@ -164,68 +165,97 @@ impl Switch for Bluetooth {
                 "Bluetooth device has no audio endpoint".into(),
             ));
         }
-        let property = if target.connected {
-            KSPROPERTY_ONESHOT_RECONNECT
-        } else {
-            KSPROPERTY_ONESHOT_DISCONNECT
-        };
-        let mut any_ok = false;
-        let mut first_error = None;
-        for ks in &container.ks {
-            let property_id = KSIDENTIFIER {
-                Anonymous: windows::Win32::Media::KernelStreaming::KSIDENTIFIER_0 {
-                    Anonymous: windows::Win32::Media::KernelStreaming::KSIDENTIFIER_0_0 {
-                        Set: KSPROPSETID_BtAudio,
-                        Id: property.0 as u32,
-                        Flags: KSPROPERTY_TYPE_GET,
-                    },
-                },
-            };
-            let mut returned = 0u32;
-            match unsafe {
-                ks.KsProperty(
-                    &property_id,
-                    std::mem::size_of::<KSIDENTIFIER>() as u32,
-                    std::ptr::null_mut(),
-                    0,
-                    &mut returned,
-                )
-            } {
-                Ok(()) => any_ok = true,
-                Err(e) => {
-                    log::warn!("bluetooth: KsProperty failed on one endpoint: {e}");
-                    first_error = first_error.or(Some(e.code().0));
-                }
-            }
-        }
-        if !any_ok {
-            return Err(SwitchError::Os {
-                api: "IKsControl::KsProperty",
-                code: first_error.unwrap_or(E_INVALIDARG.0),
-            });
-        }
-        // Connecting takes seconds: refresh the rows (and the UI) once the
-        // link has had time to come up (task 4.10).
-        #[cfg(not(test))]
-        if let Some(app) = APP.get() {
-            schedule_delayed_refresh(app.clone());
-        }
-        Ok(())
+        set_connection(container, target.connected)
     }
 
-    // restore keeps the trait default: disconnect only when the device is
-    // still connected the way the journal says we left it.
+    /// Restore addresses the JOURNALED device, not whatever is chosen now —
+    /// changing the picker mid-session must not strand the device the
+    /// session connected (same rule as microphone's endpointId).
+    fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
+        let before = parse_state::<State>(&e.before, "bluetooth")?;
+        let after = parse_state::<State>(&e.after, "bluetooth")?;
+        let Some(device_id) = before.device_id.as_deref() else {
+            return Ok(RestoreOutcome::Gone);
+        };
+        let _guard = ComGuard::new()?;
+        let containers = audio_containers()?;
+        let Some(container) = containers.iter().find(|c| c.id == device_id) else {
+            return Ok(RestoreOutcome::Gone); // device no longer known
+        };
+        if container.connected != after.connected {
+            return Ok(RestoreOutcome::UserChanged);
+        }
+        if !after.connected {
+            return Ok(RestoreOutcome::Restored); // never connected by us
+        }
+        set_connection(container, false)?;
+        Ok(RestoreOutcome::Restored)
+    }
 
     fn probe(&self) -> Result<(), String> {
-        let guard = ComGuard::new().map_err(|e| e.to_string())?;
+        // Natural drop order (guard first => CoUninitialize last) releases
+        // the enumerator and collection while the apartment is up.
+        let _guard = ComGuard::new().map_err(|e| e.to_string())?;
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .map_err(|e| e.to_string())?;
-        let result =
-            unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE(DEVICE_STATEMASK_ALL)) };
-        drop(guard);
-        result.map(|_| ()).map_err(|e| e.to_string())
+        unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE(DEVICE_STATEMASK_ALL)) }
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
+}
+
+/// Fires the one-shot reconnect/disconnect property on every IKsControl of
+/// the container. Any success counts — one endpoint accepting the property
+/// is enough to start the transition (ToothTray prior art).
+fn set_connection(container: &Container, connect: bool) -> Result<(), SwitchError> {
+    let property = if connect {
+        KSPROPERTY_ONESHOT_RECONNECT
+    } else {
+        KSPROPERTY_ONESHOT_DISCONNECT
+    };
+    let mut any_ok = false;
+    let mut first_error = None;
+    for ks in &container.ks {
+        let property_id = KSIDENTIFIER {
+            Anonymous: windows::Win32::Media::KernelStreaming::KSIDENTIFIER_0 {
+                Anonymous: windows::Win32::Media::KernelStreaming::KSIDENTIFIER_0_0 {
+                    Set: KSPROPSETID_BtAudio,
+                    Id: property.0 as u32,
+                    Flags: KSPROPERTY_TYPE_GET,
+                },
+            },
+        };
+        let mut returned = 0u32;
+        match unsafe {
+            ks.KsProperty(
+                &property_id,
+                std::mem::size_of::<KSIDENTIFIER>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+            )
+        } {
+            Ok(()) => any_ok = true,
+            Err(e) => {
+                log::warn!("bluetooth: KsProperty failed on one endpoint: {e}");
+                first_error = first_error.or(Some(e.code().0));
+            }
+        }
+    }
+    if !any_ok {
+        return Err(SwitchError::Os {
+            api: "IKsControl::KsProperty",
+            code: first_error.unwrap_or(E_INVALIDARG.0),
+        });
+    }
+    // Connecting takes seconds: refresh the rows (and the UI) once the
+    // link has had time to come up (task 4.10).
+    #[cfg(not(test))]
+    if let Some(app) = APP.get() {
+        schedule_delayed_refresh(app.clone());
+    }
+    Ok(())
 }
 
 fn chosen() -> Option<String> {
@@ -311,6 +341,10 @@ fn audio_containers() -> Result<Vec<Container>, SwitchError> {
                 }),
             }
         }
+        // Only containers with an IKsControl are Bluetooth audio devices;
+        // without this, every render endpoint's container (speakers, HDMI)
+        // would reach the picker (review finding).
+        containers.retain(|c| !c.ks.is_empty());
         Ok(containers)
     }
 }
@@ -406,8 +440,10 @@ fn bthenum_metadata() -> HashMap<String, (Option<String>, Option<u8>)> {
                 && prop_type == DEVPROP_TYPE_STRING
             {
                 let wide: Vec<u16> = bytes
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
                     .take_while(|&c| c != 0)
                     .collect();
                 entry.0 = Some(String::from_utf16_lossy(&wide));
@@ -424,10 +460,17 @@ fn bthenum_metadata() -> HashMap<String, (Option<String>, Option<u8>)> {
     map
 }
 
+/// Decodes the cfgmgr32 GUID property bytes. The buffer is the native GUID
+/// layout — Data1 u32-LE, Data2 u16-LE, Data3 u16-LE, then the 8 raw
+/// Data4 bytes — so the fields are read one by one. (A u128 round-trip
+/// scrambles them: `from_u128` takes Data1 from the HIGH bits.)
 fn guid_from_bytes(bytes: &[u8]) -> GUID {
-    GUID::from_u128(u128::from_le_bytes(
-        bytes[..16].try_into().expect("16 bytes checked by caller"),
-    ))
+    GUID::from_values(
+        u32::from_le_bytes(bytes[0..4].try_into().expect("16 bytes checked by caller")),
+        u16::from_le_bytes(bytes[4..6].try_into().expect("16 bytes checked by caller")),
+        u16::from_le_bytes(bytes[6..8].try_into().expect("16 bytes checked by caller")),
+        bytes[8..16].try_into().expect("16 bytes checked by caller"),
+    )
 }
 
 /// Raw CM_Get_DevNode_PropertyW value (probe helper): (type, bytes).
@@ -546,6 +589,29 @@ mod tests {
         assert_eq!(chosen().as_deref(), Some("{GUID}"));
         set_chosen(None);
         assert_eq!(chosen(), None);
+    }
+
+    #[test]
+    fn guid_bytes_decode_in_the_native_layout() {
+        // {104EA319-6EE2-4701-BD47-8DDBF425BBE5} as Windows stores it:
+        // Data1/Data2/Data3 little-endian, Data4 raw.
+        let guid = GUID::from_values(
+            0x104EA319,
+            0x6EE2,
+            0x4701,
+            [0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5],
+        );
+        let bytes: [u8; 16] = [
+            0x19, 0xA3, 0x4E, 0x10, // Data1 LE
+            0xE2, 0x6E, // Data2 LE
+            0x01, 0x47, // Data3 LE
+            0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5,
+        ];
+        assert_eq!(guid_from_bytes(&bytes), guid);
+        assert_eq!(
+            guid_string(&guid_from_bytes(&bytes)),
+            "{104EA319-6EE2-4701-BD47-8DDBF425BBE5}"
+        );
     }
 
     /// Read-only live probe of the walk. A machine with no Bluetooth audio

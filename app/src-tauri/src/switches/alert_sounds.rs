@@ -190,6 +190,13 @@ mod tests {
         assert_eq!(after, serde_json::json!(State { muted: true }));
     }
 
+    #[test]
+    fn target_off_is_unmuted() {
+        let off =
+            AlertSounds.target_off(&serde_json::json!(State { muted: true }), &Ctx::default());
+        assert_eq!(off, Some(serde_json::json!(State { muted: false })));
+    }
+
     /// Read-only live probe: GetMute changes nothing. A machine without a
     /// default render device (CI) surfaces as an Os error and is fine.
     #[test]

@@ -231,3 +231,17 @@ button.link {
   font-size: 12px;
   color: var(--muted);
 }
+
+/* "Show all" must not overflow the fixed 320x440 window: the panel
+   scrolls, and low rows flip their popover upward. */
+
+.panel {
+  max-height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.menu.up {
+  top: auto;
+  bottom: calc(100% - 2px);
+}

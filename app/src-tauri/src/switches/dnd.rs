@@ -28,7 +28,7 @@ pub unsafe trait IQuietHoursSettings: windows::core::IUnknown {
     fn get_UserSelectedProfile(&self, profile: *mut PWSTR) -> HRESULT;
     fn put_UserSelectedProfile(&self, profile: PCWSTR) -> HRESULT;
     fn GetProfile(&self, id: PCWSTR, out: *mut *mut core::ffi::c_void) -> HRESULT;
-    fn GetAllProfileData(&self, count: *mut u32, data: *mut *mut core::ffi::c_void) -> HRESULT;
+    fn GetAllProfileData(&self, count: *mut u32, data: *mut core::ffi::c_void) -> HRESULT;
     fn GetDisplayNameForProfile(&self, id: PCWSTR, out: *mut PWSTR) -> HRESULT;
     fn get_QuietMomentsManager(&self, out: *mut *mut core::ffi::c_void) -> HRESULT;
     fn get_OffProfileId(&self, out: *mut PWSTR) -> HRESULT;
@@ -109,10 +109,11 @@ impl Switch for Dnd {
     // when the current one is still what we set (a user change wins).
 
     fn probe(&self) -> Result<(), String> {
-        let guard = ComGuard::new().map_err(|e| e.to_string())?;
+        // Natural drop order (guard first => CoUninitialize last) releases
+        // the COM proxy while the apartment is still initialized.
+        let _guard = ComGuard::new().map_err(|e| e.to_string())?;
         let settings = create().map_err(|e| e.to_string())?;
         let profile = read_profile_of(&settings).map_err(|e| e.to_string())?;
-        drop(guard);
         match profile.as_str() {
             UNRESTRICTED | PRIORITY_ONLY | ALARMS_ONLY => Ok(()),
             other => Err(format!("unknown DND profile '{other}'")),

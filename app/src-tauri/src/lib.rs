@@ -239,7 +239,18 @@ pub fn run() {
                 os,
             }));
             // FR-6: notify what launch recovery restored, including what
-            // failed to restore.
+            // failed to restore (spec 7.3.2 also requires notifying about
+            // a quarantined corrupt journal, even when nothing was restored).
+            if recovery.corrupted {
+                use tauri_plugin_notification::NotificationExt;
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("button")
+                    .body("The leftover journal was unreadable. It was saved as journal.corrupt-*.json and nothing was restored automatically.")
+                    .show();
+                log::error!("launch recovery: journal was corrupt and got quarantined");
+            }
             if !recovery.restored.is_empty()
                 || !recovery.timers_to_rearm.is_empty()
                 || !recovery.failed.is_empty()

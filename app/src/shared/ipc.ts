@@ -74,9 +74,14 @@ export interface BtDevice {
 }
 
 /** The `offAfter` argument of `set_switch` (spec 6.1, D-051): a preset
- * string ("15m" | "1h" | "4h" | "tomorrow"), a minute count, or an RFC
- * 3339 time in the future. */
-export type OffAfter = string | { minutes: number } | { at: string };
+ * string, a minute count, or an RFC 3339 time in the future. */
+export type OffAfter =
+  | "15m"
+  | "1h"
+  | "4h"
+  | "tomorrow"
+  | { minutes: number }
+  | { at: string };
 
 // ---- Commands (spec 6.1) ----
 

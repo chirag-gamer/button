@@ -478,15 +478,22 @@ impl SessionEngine {
             let journal = self
                 .journal
                 .get_or_insert_with(|| Journal::new(&self.app_version, now));
-            // An existing Timer entry just moves its deadline.
-            if let Some(entry) = journal
+            // An existing Timer entry just moves its deadline. Roll the
+            // in-memory entry back when the rewrite fails, so memory and
+            // disk cannot disagree about when the switch turns off. (Index
+            // access, not an entry borrow: the entry is written back to
+            // after the file write.)
+            if let Some(idx) = journal
                 .entries
-                .iter_mut()
-                .rev()
-                .find(|e| e.owner == JournalOwner::Timer && e.switch == id)
+                .iter()
+                .rposition(|e| e.owner == JournalOwner::Timer && e.switch == id)
             {
-                entry.off_at = Some(deadline);
-                journal::write(journal, &self.data_dir).map_err(journal_write_err)?;
+                let previous = journal.entries[idx].off_at;
+                journal.entries[idx].off_at = Some(deadline);
+                if let Err(e) = journal::write(journal, &self.data_dir) {
+                    journal.entries[idx].off_at = previous;
+                    return Err(journal_write_err(e));
+                }
                 return Ok(());
             }
         }
@@ -549,13 +556,13 @@ impl SessionEngine {
         Ok(())
     }
 
-    /// set_switch step 5: on with no timer. A running timer is dropped (the
-    /// switch stays on with no end); an on-switch is a no-op; else apply
-    /// target_on and remember the manual record (D-030: not journaled).
+    /// set_switch step 5: on with no timer. A running timer is dropped (no
+    /// end); an on-switch is a no-op; else apply target_on and remember the
+    /// manual record (D-030: not journaled). When the user (or Windows)
+    /// turned the switch off under the timer, the plain on still applies —
+    /// dropping the entry must not swallow the turn-on.
     fn turn_on(&mut self, id: SwitchId, ctx: &Ctx) -> Result<(), SwitchError> {
-        if self.drop_timer_entry(id)? {
-            return Ok(()); // stays on, no end
-        }
+        self.drop_timer_entry(id)?;
         let switch = self
             .switches
             .iter()
@@ -583,6 +590,8 @@ impl SessionEngine {
         if self.remove_timer_entry(id)? {
             return Ok(());
         }
+        // A manual record knows what the switch came from. It stays in the
+        // map when the restore errors, so a retry walks the same path.
         let manual = self.manual.remove(&id);
         let switch = self
             .switches
@@ -591,14 +600,13 @@ impl SessionEngine {
             .map(|s| s.as_ref())
             .expect("availability checked in set_switch");
 
-        // A manual record knows what the switch came from.
         if let Some((before, after)) = manual {
             let entry = JournalEntry {
                 seq: 0,
                 owner: JournalOwner::Timer,
                 switch: id,
-                before,
-                after,
+                before: before.clone(),
+                after: after.clone(),
                 persistent: switch.persistent(),
                 off_at: None,
                 at: now,
@@ -606,13 +614,25 @@ impl SessionEngine {
             match switch.restore(&entry) {
                 Ok(RestoreOutcome::Restored) => return Ok(()),
                 Ok(RestoreOutcome::UserChanged | RestoreOutcome::Gone) => {
-                    if !switch.is_on(&switch.read()?) {
+                    let still_on = match switch.read() {
+                        Ok(current) => switch.is_on(&current),
+                        Err(e) => {
+                            // The record survives a failed read too, so a
+                            // retry walks the same path.
+                            self.manual.insert(id, (before, after));
+                            return Err(e);
+                        }
+                    };
+                    if !still_on {
                         return Ok(()); // user turned it off already
                     }
                     // Still on but not in our recorded state: fall through
                     // to target_off below.
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.manual.insert(id, (before, after));
+                    return Err(e);
+                }
             }
         }
 
@@ -628,8 +648,9 @@ impl SessionEngine {
         }
     }
 
-    /// Removes the switch's Timer entry, restoring it first. Returns
-    /// whether an entry existed.
+    /// Removes the switch's Timer entry, restoring it first. The entry
+    /// survives a failed restore (the recovery record must outlive a
+    /// transient OS error). Returns whether an entry existed.
     fn remove_timer_entry(&mut self, id: SwitchId) -> Result<bool, SwitchError> {
         let Some(idx) = self.journal.as_ref().and_then(|j| {
             j.entries
@@ -639,7 +660,7 @@ impl SessionEngine {
             return Ok(false);
         };
         let entry = self.journal.as_ref().unwrap().entries[idx].clone();
-        self.restore_entry_logged(&entry);
+        self.restore_entry_logged(&entry)?;
         self.remove_entry_and_write(idx)?;
         Ok(true)
     }
@@ -660,6 +681,7 @@ impl SessionEngine {
 
     /// set_switch step 3-off: restore one Recording entry of the active
     /// session now and remove it (the session no longer owns the switch).
+    /// A failed restore keeps the entry — the session still owns it.
     fn restore_recording_entry(&mut self, id: SwitchId) {
         let Some(idx) = self.journal.as_ref().and_then(|j| {
             j.entries
@@ -669,19 +691,33 @@ impl SessionEngine {
             return;
         };
         let entry = self.journal.as_ref().unwrap().entries[idx].clone();
-        self.restore_entry_logged(&entry);
-        let _ = self.remove_entry_and_write(idx);
+        if let Err(e) = self.restore_entry_logged(&entry) {
+            log::error!("set_switch off: {id} stays session-owned after a failed restore: {e}");
+            return;
+        }
+        if let Err(e) = self.remove_entry_and_write(idx) {
+            log::error!("set_switch off: journal rewrite failed: {e}");
+        }
     }
 
     /// Restores one entry and logs the outcome, without touching the
-    /// session summary lists (used by the quick-switch paths).
-    fn restore_entry_logged(&self, entry: &JournalEntry) {
+    /// session summary lists (used by the quick-switch paths). The error is
+    /// returned so callers can keep the journal entry for a retry.
+    fn restore_entry_logged(&self, entry: &JournalEntry) -> Result<(), SwitchError> {
         match self.switch(entry.switch) {
-            Some(switch) => match switch.restore(entry) {
-                Ok(outcome) => log::info!("restore {}: {outcome:?}", entry.switch),
-                Err(e) => log::error!("restore {}: {e}", entry.switch),
-            },
-            None => log::error!("restore {}: switch not registered", entry.switch),
+            Some(switch) => {
+                let outcome = switch.restore(entry).inspect_err(|e| {
+                    log::error!("restore {}: {e}", entry.switch);
+                })?;
+                log::info!("restore {}: {outcome:?}", entry.switch);
+                Ok(())
+            }
+            None => {
+                // Ownership of a switch this build no longer registers:
+                // nothing to restore, the entry is stale.
+                log::error!("restore {}: switch not registered", entry.switch);
+                Ok(())
+            }
         }
     }
 
@@ -709,21 +745,52 @@ impl SessionEngine {
     /// Fires every due Timer entry (spec 7.7). Wall-clock deadlines, so a
     /// deadline missed during sleep fires on the first tick after resume
     /// (FR-28). Never touches the session status or the applied/skipped/
-    /// failed summary (that is restore_all's job). Returns whether anything
+    /// failed summary (that is restore_all's job). A restore that fails
+    /// keeps its entry — the next tick retries, and the OTHER due timers
+    /// still fire (no head-of-line blocking). Returns whether anything
     /// fired.
     pub fn fire_due_timers(&mut self, now: OffsetDateTime) -> bool {
+        // Snapshot the due entries' seqs (newest first, restore order); a
+        // failed one is skipped for this pass instead of stopping the loop.
+        let due: Vec<u64> = self
+            .journal
+            .as_ref()
+            .map(|j| {
+                j.entries
+                    .iter()
+                    .filter(|e| {
+                        e.owner == JournalOwner::Timer && e.off_at.is_some_and(|t| t <= now)
+                    })
+                    .map(|e| e.seq)
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut fired = false;
-        while let Some(idx) = self.journal.as_ref().and_then(|j| {
-            j.entries
-                .iter()
-                .rposition(|e| e.owner == JournalOwner::Timer && e.off_at.is_some_and(|t| t <= now))
-        }) {
+        for seq in due {
+            let Some(idx) = self
+                .journal
+                .as_ref()
+                .and_then(|j| j.entries.iter().position(|e| e.seq == seq))
+            else {
+                continue; // removed by an earlier iteration of this pass
+            };
             let entry = self.journal.as_ref().unwrap().entries[idx].clone();
-            self.restore_entry_logged(&entry);
-            if let Err(e) = self.remove_entry_and_write(idx) {
-                log::error!("timer {}: journal write failed: {e}", entry.switch);
+            match self.restore_entry_logged(&entry) {
+                Ok(()) => {
+                    if let Err(e) = self.remove_entry_and_write(idx) {
+                        log::error!("timer {}: journal write failed: {e}", entry.switch);
+                    }
+                    fired = true;
+                }
+                Err(e) => {
+                    log::error!(
+                        "timer {}: restore failed, retrying next tick: {e}",
+                        entry.switch
+                    );
+                    // the entry stays; keep draining the other due timers
+                }
             }
-            fired = true;
         }
         if fired {
             self.refresh_rows();
@@ -735,22 +802,41 @@ impl SessionEngine {
     /// restore EVERY remaining entry — including Timer entries that are not
     /// due yet. Never runs launch recovery while the app runs: that would
     /// drop non-persistent entries like keep-awake (spec 7.3 vs 7.2).
-    pub fn restore_all_now(&mut self, now: OffsetDateTime) -> Result<(), SessionError> {
+    /// Returns how many restores failed; their entries stay in the journal
+    /// for the next recovery.
+    pub fn restore_all_now(&mut self, now: OffsetDateTime) -> Result<usize, SessionError> {
+        let mut failed = 0usize;
         if self.session.status == SessionStatus::Active {
             self.restore_all(now)?;
         }
-        while let Some(idx) = self
+        let remaining: Vec<JournalEntry> = self
             .journal
             .as_ref()
-            .and_then(|j| j.entries.iter().rposition(|_| true))
-        {
-            let entry = self.journal.as_ref().unwrap().entries[idx].clone();
-            self.restore_entry_logged(&entry);
-            self.remove_entry_and_write(idx)
-                .map_err(|e| SessionError::Io(std::io::Error::other(e.to_string())))?;
+            .map(|j| j.entries.clone())
+            .unwrap_or_default();
+        let mut kept: Vec<JournalEntry> = Vec::new();
+        for entry in remaining.iter().rev() {
+            match self.restore_entry_logged(entry) {
+                Ok(()) => {}
+                Err(_) => {
+                    failed += 1;
+                    kept.push(entry.clone());
+                }
+            }
+        }
+        kept.reverse(); // back to journal order
+        if kept.is_empty() {
+            journal::delete(&self.data_dir)?;
+            self.journal = None;
+        } else {
+            let journal = self
+                .journal
+                .get_or_insert_with(|| Journal::new(&self.app_version, now));
+            journal.entries = kept;
+            journal::write(journal, &self.data_dir)?;
         }
         self.refresh_rows();
-        Ok(())
+        Ok(failed)
     }
 
     /// Restore everything the journal still owns (spec 7.2). Idempotent:
@@ -1775,6 +1861,229 @@ mod tests {
         let _states = rig.engine.switch_states();
         let after: Vec<usize> = rig.handles.iter().map(|h| h.read_count()).collect();
         assert_eq!(reads, after, "the ticker path does zero switch reads");
+    }
+
+    #[test]
+    fn a_failed_restore_keeps_the_timer_entry() {
+        let dir = test_dir("restore-failed-keeps-entry");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 1 {
+                o.fail_restore = true;
+            }
+            o
+        });
+        let deadline = datetime!(2026-10-26 12:30:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        // Turning it off must fail and keep the recovery record on disk.
+        assert!(
+            rig.engine
+                .set_switch(SwitchId::Taskbar, false, None, now(), &ctx())
+                .is_err()
+        );
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(journal_len(&dir), 1, "the timer entry survives the failure");
+        // The fired timer retries instead of deleting the record.
+        assert!(!rig.engine.fire_due_timers(deadline));
+        assert_eq!(journal_len(&dir), 1);
+        assert!(rig.engine.has_timers());
+    }
+
+    #[test]
+    fn restore_all_now_counts_and_keeps_failed_entries() {
+        let dir = test_dir("restore-all-now-failures");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 1 {
+                o.fail_restore = true;
+            }
+            o
+        });
+        let deadline = datetime!(2027-01-01 08:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        let failed = rig.engine.restore_all_now(now()).unwrap();
+        assert_eq!(failed, 1);
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+        assert_eq!(
+            journal_len(&dir),
+            1,
+            "the failed entry stays for the next recovery"
+        );
+    }
+
+    #[test]
+    fn turning_on_after_an_out_of_band_off_still_applies() {
+        let dir = test_dir("turn-on-after-off");
+        let mut rig = build(&dir, |_| manual_opts());
+        let deadline = datetime!(2026-10-26 13:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        rig.handles[idx(SwitchId::Taskbar)].set(false); // the user undid it
+        rig.engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap();
+        assert!(
+            rig.handles[idx(SwitchId::Taskbar)].is_on(),
+            "the plain on still applies after the timer is dropped"
+        );
+        assert_eq!(journal_len(&dir), 0);
+    }
+
+    #[test]
+    fn a_timer_fires_while_a_session_is_active() {
+        let dir = test_dir("timer-during-session");
+        let mut rig = build(&dir, |_| manual_opts());
+        let selected = [SwitchId::DesktopIcons];
+        rig.engine.start(now(), &selected, &ctx()).unwrap();
+        let deadline = datetime!(2026-10-26 12:20:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: deadline }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        assert!(rig.engine.fire_due_timers(deadline));
+        assert!(!rig.handles[idx(SwitchId::Taskbar)].is_on());
+        // Spec 7.7: the session is untouched — still active, same summary.
+        assert_eq!(rig.engine.state().status, SessionStatus::Active);
+        assert_eq!(rig.engine.state().applied, vec![SwitchId::DesktopIcons]);
+        assert!(rig.engine.state().skipped.is_empty());
+        assert!(rig.engine.state().failed.is_empty());
+    }
+
+    #[test]
+    fn set_timer_apply_failure_pops_the_entry() {
+        let dir = test_dir("timer-apply-failure");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 0 {
+                o.fail_apply = true;
+            }
+            o
+        });
+        let deadline = datetime!(2026-10-26 12:40:00 UTC);
+        assert!(
+            rig.engine
+                .set_switch(
+                    SwitchId::DesktopIcons,
+                    true,
+                    Some(OffAfter::At { at: deadline }),
+                    now(),
+                    &ctx(),
+                )
+                .is_err()
+        );
+        assert_eq!(journal_len(&dir), 0, "the never-applied entry is popped");
+        assert!(!rig.engine.has_timers());
+    }
+
+    #[test]
+    fn timer_deadline_move_rolls_back_when_the_journal_write_fails() {
+        let dir = test_dir("deadline-move-rollback");
+        let mut rig = build(&dir, |_| manual_opts());
+        let first = datetime!(2026-10-26 13:00:00 UTC);
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At { at: first }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        // A directory where write_atomic wants its tmp file makes the
+        // rewrite fail (File::create cannot open a directory).
+        std::fs::create_dir_all(dir.join("journal.json.tmp")).unwrap();
+        let second = datetime!(2026-10-26 14:00:00 UTC);
+        assert!(
+            rig.engine
+                .set_switch(
+                    SwitchId::Taskbar,
+                    true,
+                    Some(OffAfter::At { at: second }),
+                    now(),
+                    &ctx(),
+                )
+                .is_err()
+        );
+        assert_eq!(journal_len(&dir), 1);
+        assert_eq!(
+            timer_entry(&dir, SwitchId::Taskbar).unwrap().2,
+            Some(first),
+            "disk keeps the old deadline"
+        );
+    }
+
+    #[test]
+    fn manual_record_survives_a_failed_restore() {
+        let dir = test_dir("manual-record-survives");
+        let mut rig = build(&dir, |i| {
+            let mut o = manual_opts();
+            if i == 1 {
+                o.fail_restore = true;
+            }
+            o
+        });
+        rig.engine
+            .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
+            .unwrap();
+        assert!(
+            rig.engine
+                .set_switch(SwitchId::Taskbar, false, None, now(), &ctx())
+                .is_err()
+        );
+        // The record was put back: the retry fails the same way instead of
+        // succeeding through target_off.
+        assert!(
+            rig.engine
+                .set_switch(SwitchId::Taskbar, false, None, later(), &ctx())
+                .is_err()
+        );
+        assert!(rig.handles[idx(SwitchId::Taskbar)].is_on());
+    }
+
+    #[test]
+    fn set_switch_rejects_unregistered_ids() {
+        let dir = test_dir("unregistered-id");
+        let mut engine = SessionEngine::new(
+            Vec::new(),
+            OsInfo {
+                build: 26200,
+                is_windows_11: true,
+            },
+            dir,
+            "0.1.0".into(),
+        );
+        let err = engine
+            .set_switch(SwitchId::Dnd, true, None, now(), &ctx())
+            .unwrap_err();
+        assert!(matches!(err, SwitchError::Invalid(_)));
     }
 
     // ---- offAfter parsing (task 4.2) ----

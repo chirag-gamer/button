@@ -101,8 +101,11 @@ pub fn set_switch(
         let ctx = automation::manual_ctx(&b.settings);
         b.engine.set_switch(id, on, off_after, now, &ctx)
     };
-    result.map_err(map_switch_error)?;
+    let outcome = result.map_err(map_switch_error);
+    // Sync tray + UI on success and on error alike: the engine may have
+    // changed state even when the turn failed (the dispatcher's rule).
     automation::after_change(&app);
+    outcome?;
     Ok(current_state(&app.state::<SharedState>()))
 }
 
@@ -124,6 +127,8 @@ pub fn list_bt_devices() -> IpcResult<Vec<crate::switches::bluetooth::BtDevice>>
 
 /// Choose the Bluetooth device the switch connects (D-078). Saves the
 /// setting right away — the Phase 5 settings window generalizes this.
+/// The candidate is persisted before anything in memory or the switch's
+/// chosen-device static changes, so a failed save cannot fork the state.
 #[tauri::command]
 pub fn set_bluetooth_device(
     app: AppHandle,
@@ -131,16 +136,19 @@ pub fn set_bluetooth_device(
     id: Option<String>,
 ) -> IpcResult<Settings> {
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
-    b.settings.bluetooth.device_id = id.clone();
+    let mut candidate = b.settings.clone();
+    candidate.bluetooth.device_id = id.clone();
+    save_settings(&app, b.settings_read_only, &candidate)?;
+    b.settings = candidate;
     crate::switches::bluetooth::set_chosen(id);
-    save_settings(&app, &b)?;
     let settings = b.settings.clone();
     drop(b);
     let _ = app.emit("settings-changed", &settings);
     Ok(settings)
 }
 
-/// The Keep Awake "Let the screen turn off" checkbox (FR-18, D-081).
+/// The Keep Awake "Let the screen turn off" checkbox (FR-18, D-081), saved
+/// through the same persist-before-commit rule.
 #[tauri::command]
 pub fn set_keep_awake_options(
     app: AppHandle,
@@ -148,8 +156,10 @@ pub fn set_keep_awake_options(
     allow_display_off: bool,
 ) -> IpcResult<Settings> {
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
-    b.settings.keep_awake.allow_display_off = allow_display_off;
-    save_settings(&app, &b)?;
+    let mut candidate = b.settings.clone();
+    candidate.keep_awake.allow_display_off = allow_display_off;
+    save_settings(&app, b.settings_read_only, &candidate)?;
+    b.settings = candidate;
     let settings = b.settings.clone();
     drop(b);
     let _ = app.emit("settings-changed", &settings);
@@ -157,9 +167,13 @@ pub fn set_keep_awake_options(
 }
 
 /// Shared tail of the two setting-writing commands: refuse to overwrite a
-/// settings file from a newer build (spec 7.12).
-fn save_settings(app: &AppHandle, b: &crate::ButtonState) -> Result<(), IpcError> {
-    if b.settings_read_only {
+/// settings file from a newer build (spec 7.12), then persist.
+fn save_settings(
+    app: &AppHandle,
+    settings_read_only: bool,
+    candidate: &Settings,
+) -> Result<(), IpcError> {
+    if settings_read_only {
         return Err(IpcError::NotAvailable(
             "the settings file was written by a newer button; not saving over it".into(),
         ));
@@ -168,5 +182,5 @@ fn save_settings(app: &AppHandle, b: &crate::ButtonState) -> Result<(), IpcError
         .path()
         .app_local_data_dir()
         .map_err(|e| IpcError::OsError(e.to_string()))?;
-    crate::settings::save(&b.settings, &dir).map_err(|e| IpcError::OsError(e.to_string()))
+    crate::settings::save(candidate, &dir).map_err(|e| IpcError::OsError(e.to_string()))
 }

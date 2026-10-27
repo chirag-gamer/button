@@ -93,8 +93,15 @@ impl Switch for Microphone {
         let before = parse_state::<State>(&e.before, "microphone")?;
         let after = parse_state::<State>(&e.after, "microphone")?;
         let _guard = ComGuard::new()?;
-        let Ok(volume) = endpoint_volume(&before.endpoint_id) else {
-            return Ok(RestoreOutcome::Gone); // device unplugged/removed
+        let volume = match endpoint_volume(&before.endpoint_id) {
+            Ok(volume) => volume,
+            // Only "endpoint no longer exists" means the device is gone; a
+            // COM hiccup must surface as a failure, not a silent skip.
+            Err(SwitchError::Os {
+                api: "IMMDeviceEnumerator::GetDevice",
+                ..
+            }) => return Ok(RestoreOutcome::Gone),
+            Err(e) => return Err(e),
         };
         let muted = unsafe {
             volume

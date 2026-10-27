@@ -66,9 +66,12 @@ impl Switch for ScreenSaver {
         if configured_saver().is_none() {
             return Err(SwitchError::NotAvailable(NOT_SET.into()));
         }
-        unsafe {
+        // WM_SYSCOMMAND legitimately returns 0 (DefWindowProc), so a zero
+        // result alone is not failure; only a recorded last error says the
+        // send timed out or was dropped (G-4: no silent failure).
+        let sent = unsafe {
             // The 2 s timeout keeps a busy desktop from blocking the caller.
-            let _ = SendMessageTimeoutW(
+            SendMessageTimeoutW(
                 GetDesktopWindow(),
                 WM_SYSCOMMAND,
                 WPARAM(SC_SCREENSAVE as usize),
@@ -76,7 +79,16 @@ impl Switch for ScreenSaver {
                 SMTO_ABORTIFHUNG,
                 2000,
                 None,
-            );
+            )
+        };
+        if sent.0 == 0 {
+            let code = unsafe { windows::Win32::Foundation::GetLastError() }.0 as i32;
+            if code != 0 {
+                return Err(SwitchError::Os {
+                    api: "SendMessageTimeoutW",
+                    code,
+                });
+            }
         }
         Ok(())
     }

@@ -49,7 +49,9 @@ impl Switch for NightLight {
     }
 
     fn is_on(&self, value: &serde_json::Value) -> bool {
-        value.as_bool().unwrap_or(false)
+        parse_state::<State>(value, "night light")
+            .map(|s| s.on)
+            .unwrap_or(false)
     }
 
     fn target_on(&self, _before: &serde_json::Value, _ctx: &Ctx) -> serde_json::Value {
@@ -104,6 +106,16 @@ mod tests {
                 .on
         );
         assert!(parse_state::<State>(&serde_json::json!({}), "t").is_err());
+    }
+
+    #[test]
+    fn is_on_reads_the_state_object() {
+        assert!(NightLight.is_on(&serde_json::json!({ "on": true })));
+        assert!(!NightLight.is_on(&serde_json::json!({ "on": false })));
+        assert!(
+            !NightLight.is_on(&serde_json::json!(true)),
+            "the state shape is an object, not a bool"
+        );
     }
 
     #[test]

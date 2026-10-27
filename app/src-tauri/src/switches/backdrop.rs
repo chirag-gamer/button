@@ -94,6 +94,12 @@ mod tests {
     }
 
     #[test]
+    fn target_off_hides() {
+        let off = Backdrop.target_off(&serde_json::json!({ "shown": true }), &Ctx::default());
+        assert_eq!(off, Some(serde_json::json!({ "shown": false })));
+    }
+
+    #[test]
     fn apply_to_false_succeeds_without_windows() {
         // Hiding what does not exist is a no-op; showing without windows
         // is an error the session reports (G-4).

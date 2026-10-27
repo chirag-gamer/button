@@ -218,11 +218,9 @@ pub fn show_dropdown(
         return Ok(());
     }
     // The list must be current the moment it shows (FR-27): refresh the row
-    // cache now — this is one of the few allowed refresh points (task 4.2).
-    if let Some(state) = app.try_state::<SharedState>() {
-        let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
-        b.engine.refresh_rows();
-    }
+    // cache AND push it — the dropdown window is long-lived, so its page
+    // only updates on state-changed.
+    automation::refresh_switches(app);
     if let Some(click) = click {
         place_at(&window, click);
     } else {
