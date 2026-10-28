@@ -213,10 +213,11 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
             Action::Start => return Ok(()),
             // Stop and Toggle cancel the countdown (FR-41 acceptance).
             Action::Stop | Action::Toggle => {
+                let counted = COUNTDOWN_GENERATION.load(Ordering::Relaxed);
                 COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
                 b.engine.set_status(SessionStatus::Idle);
                 drop(b);
-                crate::countdown::close(app);
+                crate::countdown::close(app, counted);
                 after_change(app);
                 return Ok(());
             }
@@ -224,10 +225,11 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
             // journal is empty during a countdown, so this is the
             // "nothing to restore" notification).
             Action::Restore => {
+                let counted = COUNTDOWN_GENERATION.load(Ordering::Relaxed);
                 COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
                 b.engine.set_status(SessionStatus::Idle);
                 drop(b);
-                crate::countdown::close(app);
+                crate::countdown::close(app, counted);
                 after_change(app);
                 b = state.lock().unwrap_or_else(|p| p.into_inner());
             }
@@ -346,7 +348,9 @@ fn spawn_countdown(app: AppHandle, generation: u64) {
         crate::countdown::open(&app, generation);
         for seconds_left in [3u8, 2, 1] {
             if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
-                crate::countdown::close(&app);
+                // Cancelled: the cancelling trigger already closed this
+                // generation's window (or the build thread's self-check
+                // will); never close another generation's window.
                 return;
             }
             let _ = app.emit(
@@ -355,7 +359,10 @@ fn spawn_countdown(app: AppHandle, generation: u64) {
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        crate::countdown::close(&app);
+        if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        crate::countdown::close(&app, generation);
         if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
             return;
         }

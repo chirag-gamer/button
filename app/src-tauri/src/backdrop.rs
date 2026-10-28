@@ -28,6 +28,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static SHOWN: AtomicBool = AtomicBool::new(false);
 
+/// Mirror of `settings.backdrop.monitors` (0 = all, 1 = front). Written
+/// by `cache_monitors` (startup and every settings commit) and read by
+/// `show()`/`on_foreground()`, which run under the shared-state lock or
+/// the foreground hook and must not take the state lock themselves.
+static MONITORS_FRONT: AtomicBool = AtomicBool::new(false);
+
+/// Refresh the monitors mirror from a settings snapshot.
+pub fn cache_monitors(setting: crate::settings::BackdropMonitors) {
+    MONITORS_FRONT.store(
+        matches!(setting, crate::settings::BackdropMonitors::Front),
+        Ordering::Relaxed,
+    );
+}
+
+/// The cached monitor routing.
+fn monitors_setting() -> crate::settings::BackdropMonitors {
+    if MONITORS_FRONT.load(Ordering::Relaxed) {
+        crate::settings::BackdropMonitors::Front
+    } else {
+        crate::settings::BackdropMonitors::All
+    }
+}
+
 #[derive(Clone)]
 struct BackdropWindow {
     #[cfg_attr(test, allow(dead_code))]
@@ -147,11 +170,10 @@ pub fn show() -> Result<(), String> {
     };
     let anchor = crate::front::backdrop_anchor()
         .ok_or("no front app to anchor the backdrop; not covering the screen")?;
-    let setting = {
-        let state = app.state::<crate::SharedState>();
-        let b = state.lock().unwrap_or_else(|p| p.into_inner());
-        b.settings.backdrop.monitors
-    };
+    // The engine holds the shared-state lock when it calls apply(); show()
+    // must never take that lock (non-reentrant deadlock). The setting is
+    // mirrored into an atomic by commit_shared / startup instead.
+    let setting = monitors_setting();
     // FR-46/D-049: with monitors = front, only the front app's monitor is
     // covered (primary when no front app is tracked).
     let front_rect = match setting {
@@ -325,6 +347,8 @@ pub fn hide() {}
 /// style and render gradients, pictures and the wallpaper (spec 7.9).
 #[cfg(not(test))]
 pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
+    // Keep the atomic mirror in sync with the committed settings.
+    crate::backdrop::cache_monitors(backdrop.monitors);
     let (r, g, b) = parse_hex_color(&backdrop.color).unwrap_or_else(|| {
         log::warn!(
             "backdrop: unparsable colour {:?}; using the default",
@@ -351,7 +375,10 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
 }
 
 #[cfg(test)]
-pub fn restyle(_app: &AppHandle, _backdrop: &crate::settings::Backdrop) {}
+pub fn restyle(_app: &AppHandle, backdrop: &crate::settings::Backdrop) {
+    // The real restyle updates the mirror; tests must stay consistent.
+    crate::backdrop::cache_monitors(backdrop.monitors);
+}
 
 /// Monitor bounds as a comparable tuple (physical px).
 #[cfg_attr(test, allow(dead_code))] // the caller (show) is stubbed in tests
@@ -484,23 +511,11 @@ pub fn on_foreground(hwnd: isize) {
     }
     let snapshot: Vec<BackdropWindow> =
         { WINDOWS.lock().unwrap_or_else(|p| p.into_inner()).clone() };
-    #[cfg(not(test))]
-    let setting = {
-        match APP.get().map(|app| {
-            let state = app.state::<crate::SharedState>();
-            let b = state.lock().unwrap_or_else(|p| p.into_inner());
-            b.settings.backdrop.monitors
-        }) {
-            Some(setting) => setting,
-            None => return,
-        }
-    };
-    #[cfg(test)]
-    let setting = crate::settings::BackdropMonitors::All;
-    #[cfg(test)]
-    let _ = setting;
-    // Under test the branch is compiled out: APP, the window list and the
-    // Win32 monitor queries do not exist in test binaries (D-074).
+    // Hook path: no app state, no blocking (front.rs, spec 7.9) — the
+    // setting comes from the atomic mirror, never the state lock.
+    // Under test the only consumer is compiled out (D-074).
+    #[cfg_attr(test, allow(unused_variables))]
+    let setting = monitors_setting();
     #[cfg(not(test))]
     if setting == crate::settings::BackdropMonitors::Front {
         let Some(app) = APP.get() else {

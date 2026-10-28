@@ -204,14 +204,20 @@ pub(crate) fn commit_shared(
                     .map_err(|e| IpcError::OsError(e.to_string()))
             })?;
     }
-    {
+    let backdrop_changed = {
         let mut b = shared.lock().unwrap_or_else(|p| p.into_inner());
+        // Restyle only on a real backdrop change (spec 7.9): every other
+        // save must not reload the backdrop webviews.
+        let changed = b.settings.backdrop != candidate.backdrop;
         b.settings = candidate.clone();
-    }
+        changed
+    };
     // Infallible effects; failures are logged, never reported (the file is
     // already saved).
     crate::tray::update_tray(app);
-    crate::backdrop::restyle(app, &candidate.backdrop);
+    if backdrop_changed {
+        crate::backdrop::restyle(app, &candidate.backdrop);
+    }
     let _ = app.emit("settings-changed", &candidate);
     Ok(candidate)
 }

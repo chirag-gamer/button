@@ -206,6 +206,9 @@ pub fn run() {
                 | settings::SettingsRead::Newer(s) => s,
             };
             let backdrop_color = settings.backdrop.color.clone();
+            // The engine/hook paths read the monitor routing from the
+            // atomic mirror, never the state lock (D-066 pattern).
+            crate::backdrop::cache_monitors(settings.backdrop.monitors);
             let start_with_windows = settings.general.start_with_windows;
             let hotkeys_setting = settings.hotkeys.clone();
 

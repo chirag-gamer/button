@@ -5,7 +5,12 @@
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-pub const LABEL: &str = "countdown";
+/// The window label for a countdown generation. One label per countdown:
+/// a stale thread can then only close its own window, never a successor's
+/// (every trigger cancels by bumping the generation).
+fn label(generation: u64) -> String {
+    format!("countdown-{generation}")
+}
 
 /// Open the countdown window, centred on the front app's monitor (else
 /// the primary). The builder runs on its own thread (D-071 deadlock
@@ -14,26 +19,33 @@ pub const LABEL: &str = "countdown";
 /// was cancelled while the window was still building, the window closes
 /// itself right after the build instead of lingering as an orphan.
 pub fn open(app: &AppHandle, generation: u64) {
+    // Clear a leftover window first (e.g. a previous close lost the race
+    // against a fast restart): the fixed-label era failed here with
+    // WindowLabelAlreadyExists, which only logged.
+    close(app, generation);
     let app2 = app.clone();
     std::thread::spawn(move || {
-        let window =
-            match WebviewWindowBuilder::new(&app2, LABEL, WebviewUrl::App("countdown.html".into()))
-                .inner_size(240.0, 240.0)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .focusable(false)
-                .resizable(false)
-                .shadow(false)
-                .content_protected(true)
-                .build()
-            {
-                Ok(window) => window,
-                Err(e) => {
-                    log::error!("countdown window could not be created: {e}");
-                    return;
-                }
-            };
+        let window = match WebviewWindowBuilder::new(
+            &app2,
+            label(generation),
+            WebviewUrl::App("countdown.html".into()),
+        )
+        .inner_size(240.0, 240.0)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focusable(false)
+        .resizable(false)
+        .shadow(false)
+        .content_protected(true)
+        .build()
+        {
+            Ok(window) => window,
+            Err(e) => {
+                log::error!("countdown window could not be created: {e}");
+                return;
+            }
+        };
         if crate::automation::countdown_generation() != generation {
             let _ = window.close();
             return;
@@ -44,10 +56,11 @@ pub fn open(app: &AppHandle, generation: u64) {
     });
 }
 
-/// Close the countdown window if it exists; a missing one is fine (the
-/// build thread may not have finished, or it already closed itself).
-pub fn close(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(LABEL) {
+/// Close the countdown window of one generation if it exists; a missing
+/// one is fine (the build thread may not have finished, or it already
+/// closed itself).
+pub fn close(app: &AppHandle, generation: u64) {
+    if let Some(window) = app.get_webview_window(&label(generation)) {
         let _ = window.close();
     }
 }
