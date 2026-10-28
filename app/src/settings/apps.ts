@@ -7,17 +7,22 @@ function sameName(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/** Is `name` a bare executable file name like Zoom.exe (no directories,
+ * no drive letters, exactly .exe)? Mirrors settings.rs is_exe_name. */
+export function isExeName(name: string): boolean {
+  const trimmed = name.trim();
+  return (
+    trimmed.length > 4 &&
+    trimmed.toLowerCase().endsWith(".exe") &&
+    !/[/\\:*?"<>|]/.test(trimmed)
+  );
+}
+
 /** Append a typed app name. Returns null when it is not a bare executable
  * file name like Zoom.exe, or is already on the list. */
 export function addApp(list: string[], name: string): string[] | null {
   const trimmed = name.trim();
-  // Bare file name only: no directories or drive letters, exactly .exe and
-  // at least one character before it (mirrors settings.rs is_exe_name).
-  if (
-    trimmed.length <= 4 ||
-    !trimmed.toLowerCase().endsWith(".exe") ||
-    /[/\\:*?"<>|]/.test(trimmed)
-  ) {
+  if (!isExeName(trimmed)) {
     return null;
   }
   if (list.some((entry) => sameName(entry, trimmed))) return null;

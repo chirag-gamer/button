@@ -28,7 +28,7 @@ import {
   pickBackdropPicture,
   saveSettings,
 } from "../shared/ipc";
-import { addApp, moveApp, removeApp } from "./apps";
+import { addApp, isExeName, moveApp, removeApp } from "./apps";
 import { moveBetween, reorder, Shelves } from "./shelves";
 
 // Display names mirror the dropdown's LABELS (spec 7.5 catalogue).
@@ -520,9 +520,15 @@ function addFromShelf(shelf: AppShelf): void {
       showError(`'${name}' is already on ${otherName}`);
       return false;
     }
+    if (!isExeName(name)) {
+      showError(`'${name}' is not an executable file name like Zoom.exe`);
+      return false;
+    }
     const withApp = addApp(next.apps[shelf], name);
     if (withApp === null) {
-      showError(`'${name}' is not an executable file name like Zoom.exe`);
+      // Shape is validated above, so a refusal here is a duplicate on
+      // this shelf (the other-shelf case was refused before it).
+      showError(`'${name}' is already on the list`);
       return false;
     }
     next.apps[shelf] = withApp;

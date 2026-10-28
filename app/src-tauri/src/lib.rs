@@ -329,7 +329,7 @@ pub fn run() {
             // every switch hotkey, registered at launch. Failure leaves
             // registered=false and the dropdown warns (spec 7.11).
             if let Err(message) =
-                hotkeys::apply_all(app.handle(), &settings::Hotkeys::default(), &hotkeys_setting)
+                hotkeys::register_all(app.handle(), &hotkeys_setting)
             {
                 log::warn!("{message}");
             }

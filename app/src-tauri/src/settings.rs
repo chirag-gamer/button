@@ -584,6 +584,12 @@ fn validate_hotkeys(hotkeys: &Hotkeys) -> Result<(), String> {
         bindings.push((binding.to_string(), shortcut));
         Ok(())
     };
+    // The recording-mode toggle must always have a binding (FR-9: the
+    // system-wide toggle is core; an empty binding would silently disable
+    // it). Only switch hotkeys may be cleared.
+    if hotkeys.recording_mode.is_empty() {
+        return Err("the Recording Mode hotkey cannot be empty".into());
+    }
     check("recording mode", &hotkeys.recording_mode)?;
     for (id, binding) in &hotkeys.switches {
         if crate::automation::parse_switch_id(id).is_err() {
@@ -841,12 +847,13 @@ mod tests {
     #[test]
     fn a_hotkey_clash_is_detected_by_the_parsed_id_not_the_string() {
         let mut settings = Settings::default();
-        // Same combo spelled differently: both parse to the same id.
+        // Same combo spelled differently: both parse to the same id, so
+        // a string comparison would pass this test.
         settings.hotkeys.recording_mode = "Ctrl+K".into();
         settings
             .hotkeys
             .switches
-            .insert("keep-awake".into(), "Ctrl+K".into());
+            .insert("keep-awake".into(), "CONTROL+K".into());
         let message = normalize_err(settings);
         assert!(message.contains("already used by"), "message: {message}");
     }

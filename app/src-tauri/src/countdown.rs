@@ -19,10 +19,8 @@ fn label(generation: u64) -> String {
 /// was cancelled while the window was still building, the window closes
 /// itself right after the build instead of lingering as an orphan.
 pub fn open(app: &AppHandle, generation: u64) {
-    // Clear a leftover window first (e.g. a previous close lost the race
-    // against a fast restart): the fixed-label era failed here with
-    // WindowLabelAlreadyExists, which only logged.
-    close(app, generation);
+    // Window labels carry the generation, so a label can never repeat
+    // (generations only grow): no leftover can collide with this build.
     let app2 = app.clone();
     std::thread::spawn(move || {
         let window = match WebviewWindowBuilder::new(

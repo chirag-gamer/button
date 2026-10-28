@@ -19,22 +19,6 @@ const CODE_BY_CODE: Record<string, string> = {
   Tab: "Tab",
 };
 
-/** Whether `code` names a key the global-hotkey parser accepts. */
-export function isCapturableCode(code: string): boolean {
-  if (/^Key[A-Z]$/.test(code)) return true;
-  if (/^Digit[0-9]$/.test(code)) return true;
-  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return true;
-  return (
-    code === "Space" ||
-    code === "ArrowUp" ||
-    code === "ArrowDown" ||
-    code === "ArrowLeft" ||
-    code === "ArrowRight" ||
-    code === "Enter" ||
-    code === "Tab"
-  );
-}
-
 /** The global-hotkey key token for a KeyboardEvent, or null when the
  * event is not a capturable key (modifier-only presses, IME, dead keys).
  * `Escape` is returned as a key so the caller can cancel; saving it is

@@ -180,14 +180,19 @@ pub fn show() -> Result<(), String> {
         crate::settings::BackdropMonitors::Front => monitor_rect_of(anchor),
         _ => None,
     };
-    let primary_rect = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| monitor_rect(&m));
     let app2 = app.clone();
     app.run_on_main_thread(move || {
+        // Monitor getters are main-thread round trips; they must run
+        // inside this closure (inline on the main thread), never outside
+        // it — show() runs under the shared-state lock, and a blocking
+        // getter here could deadlock against main-thread handlers that
+        // want the same lock (tray menu, onboarding destroy).
         let monitors = app2.available_monitors().ok();
+        let primary_rect = app2
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| monitor_rect(&m));
         for w in snapshot.iter() {
             let Some(window) = app2.get_webview_window(&w.label) else {
                 continue;
@@ -522,13 +527,15 @@ pub fn on_foreground(hwnd: isize) {
             return;
         };
         let front = monitor_rect_of(hwnd);
-        let primary = app
-            .primary_monitor()
-            .ok()
-            .flatten()
-            .map(|m| monitor_rect(&m));
         let app2 = app.clone();
         let _ = app.run_on_main_thread(move || {
+            // Same rule as show(): monitor getters live inside the
+            // main-thread closure.
+            let primary = app2
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| monitor_rect(&m));
             for w in snapshot {
                 let Some(window) = app2.get_webview_window(&w.label) else {
                     continue;

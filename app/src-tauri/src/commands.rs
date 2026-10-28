@@ -213,7 +213,10 @@ pub(crate) fn commit_shared(
         changed
     };
     // Infallible effects; failures are logged, never reported (the file is
-    // already saved).
+    // already saved). The Bluetooth switch reads its target from the
+    // process-wide chosen device, not settings, so every commit syncs it
+    // (the same refresh set_bluetooth_device does).
+    crate::switches::bluetooth::set_chosen(candidate.bluetooth.device_id.clone());
     crate::tray::update_tray(app);
     if backdrop_changed {
         crate::backdrop::restyle(app, &candidate.backdrop);

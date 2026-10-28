@@ -26,12 +26,37 @@ pub fn apply_all(app: &AppHandle, previous: &Hotkeys, next: &Hotkeys) -> Result<
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| format!("unregistering the old hotkeys failed: {e}"))?;
+    register_set(app, next, parse, Some(&old))
+}
 
+/// Launch registration (spec 7.11): there is no previous set to restore,
+/// so a failure leaves everything unregistered and the FR-9 warning shows.
+/// Rebinding at runtime uses `apply_all`, which rolls back.
+pub fn register_all(app: &AppHandle, next: &Hotkeys) -> Result<(), String> {
+    let parse = |binding: &str| -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
+        binding
+            .parse::<tauri_plugin_global_shortcut::Shortcut>()
+            .map_err(|_| format!("'{binding}' is not a valid hotkey"))
+    };
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| format!("unregistering the old hotkeys failed: {e}"))?;
+    register_set(app, next, parse, None)
+}
+
+/// The shared registration loop. `previous` is the set to roll back to on
+/// failure; `None` at launch (nothing to restore, unregister everything).
+fn register_set(
+    app: &AppHandle,
+    next: &Hotkeys,
+    parse: impl Fn(&str) -> Result<tauri_plugin_global_shortcut::Shortcut, String>,
+    previous: Option<&[(String, Action)]>,
+) -> Result<(), String> {
     let mut registered: Vec<(String, tauri_plugin_global_shortcut::Shortcut)> = Vec::new();
     for (binding, action) in hotkey_list(next) {
         let shortcut = match parse(&binding) {
             Ok(shortcut) => shortcut,
-            Err(message) => return rollback(app, &old, &message),
+            Err(message) => return fail(app, previous, &message),
         };
         let result = app
             .global_shortcut()
@@ -44,7 +69,7 @@ pub fn apply_all(app: &AppHandle, previous: &Hotkeys, next: &Hotkeys) -> Result<
             });
         if let Err(e) = result {
             let message = format!("'{binding}' is not available: {e}");
-            return rollback(app, &old, &message);
+            return fail(app, previous, &message);
         }
         registered.push((binding, shortcut));
     }
@@ -56,6 +81,22 @@ pub fn apply_all(app: &AppHandle, previous: &Hotkeys, next: &Hotkeys) -> Result<
         .unwrap_or(false);
     set_registered(app, &rm_binding, registered_ok);
     Ok(())
+}
+
+/// Fail a registration run: roll back to the previous set when there is
+/// one, otherwise leave nothing registered (launch).
+fn fail(
+    app: &AppHandle,
+    previous: Option<&[(String, Action)]>,
+    message: &str,
+) -> Result<(), String> {
+    match previous {
+        Some(old) => rollback(app, old, message),
+        None => {
+            let _ = app.global_shortcut().unregister_all();
+            Err(message.to_string())
+        }
+    }
 }
 
 /// The (binding, dispatcher action) pairs of a hotkey set, skipping empty

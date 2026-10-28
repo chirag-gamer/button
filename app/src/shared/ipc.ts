@@ -183,9 +183,6 @@ export const openOnboarding = () => call<void>("open_onboarding");
 export const pickBackdropPicture = () =>
   call<string | null>("pick_backdrop_picture");
 
-/** The backdrop configuration the overlay page renders (FR-46). */
-export type BackdropStyle = Settings["backdrop"];
-
 /** Raw image bytes for the backdrop picture/wallpaper; an empty body
  * means "no usable image, fall back to the colour". */
 export async function getBackdropImage(): Promise<ArrayBuffer> {

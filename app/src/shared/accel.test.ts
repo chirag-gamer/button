@@ -1,6 +1,6 @@
 // eventToAccelerator: KeyboardEvent → accelerator token (FR-45).
 import { describe, expect, it } from "vitest";
-import { eventToAccelerator, isCapturableCode } from "./accel";
+import { eventToAccelerator } from "./accel";
 
 const ev = (overrides: Partial<KeyboardEvent>) => ({
   ctrlKey: false,
@@ -63,12 +63,3 @@ describe("eventToAccelerator", () => {
   });
 });
 
-describe("isCapturableCode", () => {
-  it("accepts letters, digits, f-keys and named keys", () => {
-    expect(isCapturableCode("KeyZ")).toBe(true);
-    expect(isCapturableCode("Digit0")).toBe(true);
-    expect(isCapturableCode("F1")).toBe(true);
-    expect(isCapturableCode("F25")).toBe(false);
-    expect(isCapturableCode("Semicolon")).toBe(false);
-  });
-});
