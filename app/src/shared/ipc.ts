@@ -55,14 +55,45 @@ export interface AppState {
   update?: { version: string };
 }
 
-// ---- Settings subset the dropdown needs (spec 5.1) ----
+// ---- Settings (spec 5.1) ----
+
+/** A backdrop gradient preset id (D-087); the CSS classes live in
+ * overlays/backdrop.css. */
+export type GradientPreset =
+  | "dusk"
+  | "ocean"
+  | "ember"
+  | "forest"
+  | "violet"
+  | "slate";
 
 export interface Settings {
   schemaVersion: number;
-  recordingMode: { actions: SwitchId[] };
+  recordingMode: {
+    actions: SwitchId[];
+    countdown: boolean;
+    timeLimitMinutes: number | null;
+  };
+  hotkeys: { recordingMode: string; switches: Partial<Record<SwitchId, string>> };
   dropdown: { shown: SwitchId[]; more: SwitchId[]; hidden: SwitchId[] };
+  apps: { staysOnScreen: string[]; hidden: string[] };
+  trayIcons: { visible: string[] };
+  backdrop: {
+    style: "color" | "gradient" | "picture" | "wallpaper";
+    color: string;
+    gradient: GradientPreset | null;
+    picture: string | null;
+    blur: number;
+    dim: number;
+    monitors: "all" | "front";
+  };
   keepAwake: { defaultMinutes: number; allowDisplayOff: boolean };
   bluetooth: { deviceId: string | null };
+  general: {
+    startWithWindows: boolean;
+    checkForUpdates: boolean;
+    onboardingDone: boolean;
+  };
 }
 
 /** One Bluetooth audio device from `list_bt_devices` (FR-38). */
@@ -127,6 +158,43 @@ export const setBluetoothDevice = (id: string | null) =>
   call<Settings>("set_bluetooth_device", { id });
 export const setKeepAwakeOptions = (allowDisplayOff: boolean) =>
   call<Settings>("set_keep_awake_options", { allowDisplayOff });
+export const saveSettings = (settings: Settings) =>
+  call<Settings>("save_settings", { settings });
+export const extendRecording = (minutes: number) =>
+  call<AppState>("extend_recording", { minutes });
+
+/** One running app for the app shelves (FR-43): exe basename + name. */
+export interface AppInfo {
+  exe: string;
+  name: string;
+}
+
+/** One third-party tray icon for the Visible shelf (FR-30). */
+export interface TrayIconInfo {
+  key: string;
+  exe: string;
+  promoted: boolean;
+}
+
+export const listApps = () => call<AppInfo[]>("list_apps");
+export const listTrayIcons = () => call<TrayIconInfo[]>("list_tray_icons");
+export const openSettings = () => call<void>("open_settings");
+export const openOnboarding = () => call<void>("open_onboarding");
+export const pickBackdropPicture = () =>
+  call<string | null>("pick_backdrop_picture");
+
+/** The backdrop configuration the overlay page renders (FR-46). */
+export type BackdropStyle = Settings["backdrop"];
+
+/** Raw image bytes for the backdrop picture/wallpaper; an empty body
+ * means "no usable image, fall back to the colour". */
+export async function getBackdropImage(): Promise<ArrayBuffer> {
+  const response = await invoke<ArrayBuffer>("get_backdrop_image");
+  return response;
+}
+
+export const getBackdropStyle = () =>
+  call<Settings["backdrop"]>("get_backdrop_style");
 
 // ---- Events (spec 6.2) ----
 
@@ -138,4 +206,13 @@ export function onStateChanged(
 
 export function onSettingsChanged(handler: (settings: Settings) => void): Promise<() => void> {
   return listen<Settings>("settings-changed", (event) => handler(event.payload));
+}
+
+/** The 3·2·1 countdown ticks (FR-41). */
+export function onCountdown(
+  handler: (secondsLeft: 3 | 2 | 1) => void,
+): Promise<() => void> {
+  return listen<{ secondsLeft: 3 | 2 | 1 }>("countdown", (event) =>
+    handler(event.payload.secondsLeft),
+  );
 }

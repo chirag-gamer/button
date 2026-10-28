@@ -169,7 +169,14 @@ pub enum BackdropStyle {
     Color,
     Gradient,
     Picture,
+    /// The current Windows wallpaper (D-087), read at apply time.
+    Wallpaper,
 }
+
+/// Gradient preset ids (D-087): `backdrop.gradient` stores one of these,
+/// rendered by the matching CSS class in backdrop.css (FR-46 "preset
+/// gradients").
+pub const GRADIENT_PRESETS: [&str; 6] = ["dusk", "ocean", "ember", "forest", "violet", "slate"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -184,8 +191,8 @@ pub struct Backdrop {
     pub style: BackdropStyle,
     /// "#rrggbb" (validated).
     pub color: String,
-    /// Shape is decided in task 5.6 (FR-46); stored as raw JSON until then.
-    pub gradient: Option<serde_json::Value>,
+    /// A preset id from GRADIENT_PRESETS when style = gradient (D-087).
+    pub gradient: Option<String>,
     pub picture: Option<String>,
     pub blur: u8,
     pub dim: u8,
@@ -377,6 +384,243 @@ pub fn is_valid_hex_colour(s: &str) -> bool {
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
+/// The switch ids Recording Mode may run, in spec 7.1 apply order.
+const ACTION_IDS: [SwitchId; 10] = [
+    SwitchId::Dnd,
+    SwitchId::AlertSounds,
+    SwitchId::KeepAwake,
+    SwitchId::OtherApps,
+    SwitchId::Backdrop,
+    SwitchId::DesktopIcons,
+    SwitchId::Taskbar,
+    SwitchId::TrayIcons,
+    SwitchId::DarkMode,
+    SwitchId::NightLight,
+];
+
+/// Is `name` a bare executable file name like "Zoom.exe" (spec 5.1)?
+fn is_exe_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !name.is_empty()
+        && lower.ends_with(".exe")
+        && name.len() > 4
+        && !name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    // Windows absolute: "C:\..." or a UNC path. No networked expansion here.
+    let bytes = path.as_bytes();
+    (bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/'))
+        || path.starts_with("\\\\")
+}
+
+fn dedupe_ci(list: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    list.retain(|value| {
+        let lower = value.to_ascii_lowercase();
+        if seen.contains(&lower) {
+            false
+        } else {
+            seen.push(lower);
+            true
+        }
+    });
+}
+
+/// Save-time validation + normalisation for the Phase 5 writer (spec 6.1).
+/// Field-specific messages; the caller maps them to INVALID_ARGUMENT.
+/// Normalises in place: dedupes, drops empty hotkeys, fills dropdown.
+pub fn normalize_saving(settings: &mut Settings) -> Result<(), String> {
+    // Recording Mode actions: subset of the §7.1 ids, no duplicates.
+    let mut actions: Vec<SwitchId> = Vec::new();
+    for id in &settings.recording_mode.actions {
+        if !ACTION_IDS.contains(id) {
+            return Err(format!("'{id}' is not a Recording Mode action"));
+        }
+        if actions.contains(id) {
+            return Err(format!("'{id}' is listed twice"));
+        }
+        actions.push(*id);
+    }
+    settings.recording_mode.actions = actions;
+
+    match settings.recording_mode.time_limit_minutes {
+        None | Some(1..=480) => {}
+        Some(other) => {
+            return Err(format!("time limit must be 1-480 minutes, not {other}"));
+        }
+    }
+
+    // Empty bindings are removed (the editor's Clear), then validated.
+    settings
+        .hotkeys
+        .switches
+        .retain(|_, binding| !binding.is_empty());
+    validate_hotkeys(&settings.hotkeys)?;
+
+    // Dropdown: every switch exactly once; missing ones land in "more".
+    let all: [SwitchId; 14] = [
+        SwitchId::Dnd,
+        SwitchId::DesktopIcons,
+        SwitchId::OtherApps,
+        SwitchId::Taskbar,
+        SwitchId::TrayIcons,
+        SwitchId::Backdrop,
+        SwitchId::KeepAwake,
+        SwitchId::AlertSounds,
+        SwitchId::DarkMode,
+        SwitchId::NightLight,
+        SwitchId::ScreenSaver,
+        SwitchId::Microphone,
+        SwitchId::LockKeyboard,
+        SwitchId::Bluetooth,
+    ];
+    let mut placed: Vec<SwitchId> = Vec::new();
+    for list in [
+        &mut settings.dropdown.shown,
+        &mut settings.dropdown.more,
+        &mut settings.dropdown.hidden,
+    ] {
+        list.retain(|id| {
+            if placed.contains(id) {
+                return false; // duplicate across shelves: keep the first
+            }
+            if !all.contains(id) {
+                return false; // cannot happen through the enum, belt only
+            }
+            placed.push(*id);
+            true
+        });
+    }
+    for id in all.iter().filter(|id| !placed.contains(id)) {
+        settings.dropdown.more.push(*id);
+    }
+
+    // Apps: bare exe names, deduped case-insensitively, never on both lists.
+    for name in settings
+        .apps
+        .stays_on_screen
+        .iter()
+        .chain(&settings.apps.hidden)
+    {
+        if !is_exe_name(name) {
+            return Err(format!(
+                "'{name}' is not an executable file name like Zoom.exe"
+            ));
+        }
+    }
+    let lower_stays: Vec<String> = settings
+        .apps
+        .stays_on_screen
+        .iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+    for name in &settings.apps.hidden {
+        if lower_stays.contains(&name.to_ascii_lowercase()) {
+            return Err(format!(
+                "'{name}' is on both shelves; an app is either on Stays on Screen or Hidden"
+            ));
+        }
+    }
+    dedupe_ci(&mut settings.apps.stays_on_screen);
+    dedupe_ci(&mut settings.apps.hidden);
+
+    for path in &settings.tray_icons.visible {
+        if !is_absolute_path(path) {
+            return Err(format!("'{path}' is not an absolute path"));
+        }
+    }
+    dedupe_ci(&mut settings.tray_icons.visible);
+
+    validate_backdrop(&settings.backdrop)?;
+
+    if !(1..=1440).contains(&settings.keep_awake.default_minutes) {
+        return Err(format!(
+            "Keep Awake default must be 1-1440 minutes, not {}",
+            settings.keep_awake.default_minutes
+        ));
+    }
+    if settings
+        .bluetooth
+        .device_id
+        .as_ref()
+        .is_some_and(|id| id.is_empty())
+    {
+        return Err("Bluetooth device id cannot be empty".into());
+    }
+    Ok(())
+}
+
+/// Every binding parses as an accelerator, has Ctrl/Alt/Win (Shift-only
+/// would hijack typing), is not Escape (the fixed Lock Keyboard unlock
+/// combo), and no two share a parsed id (spec 7.11). Empty = removed.
+fn validate_hotkeys(hotkeys: &Hotkeys) -> Result<(), String> {
+    let mut bindings: Vec<(String, global_hotkey::hotkey::HotKey)> = Vec::new();
+    let mut check = |label: &str, binding: &str| -> Result<(), String> {
+        if binding.is_empty() {
+            return Ok(()); // cleared binding
+        }
+        let Ok(shortcut) = binding.parse::<global_hotkey::hotkey::HotKey>() else {
+            return Err(format!("'{binding}' is not a valid {label} hotkey"));
+        };
+        use global_hotkey::hotkey::{Code, Modifiers};
+        let wanted = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER;
+        if !shortcut.mods.intersects(wanted) {
+            return Err(format!(
+                "'{binding}' needs Ctrl, Alt or Win so it cannot hijack plain typing"
+            ));
+        }
+        if shortcut.key == Code::Escape {
+            return Err("Escape is reserved: it unlocks the keyboard".into());
+        }
+        if let Some((_, first)) = bindings.iter().find(|(_, s)| s.id == shortcut.id) {
+            return Err(format!("'{binding}' is already used by '{first}'"));
+        }
+        bindings.push((binding.to_string(), shortcut));
+        Ok(())
+    };
+    check("recording mode", &hotkeys.recording_mode)?;
+    for (id, binding) in &hotkeys.switches {
+        if crate::automation::parse_switch_id(id).is_err() {
+            return Err(format!("'{id}' is not a switch"));
+        }
+        check(&format!("'{id}' hotkey"), binding)?;
+    }
+    Ok(())
+}
+
+fn validate_backdrop(backdrop: &Backdrop) -> Result<(), String> {
+    if !is_valid_hex_colour(&backdrop.color) {
+        return Err(format!("'{}' is not a #rrggbb colour", backdrop.color));
+    }
+    match backdrop.style {
+        BackdropStyle::Gradient => {
+            let Some(id) = &backdrop.gradient else {
+                return Err("a gradient style needs a gradient preset".into());
+            };
+            if !GRADIENT_PRESETS.contains(&id.as_str()) {
+                return Err(format!("'{id}' is not a gradient preset"));
+            }
+        }
+        BackdropStyle::Picture if backdrop.picture.as_ref().is_none_or(String::is_empty) => {
+            return Err("a picture style needs a picture path".into());
+        }
+        _ => {}
+    }
+    if backdrop.blur > 40 {
+        return Err(format!("blur must be 0-40 px, not {}", backdrop.blur));
+    }
+    if backdrop.dim > 80 {
+        return Err(format!("dim must be 0-80 %, not {}", backdrop.dim));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +789,267 @@ mod tests {
             other => panic!("expected Newer, got {other:?}"),
         }
         assert_eq!(fs::read_to_string(settings_path(&dir)).unwrap(), original);
+    }
+
+    // ---- save-time validation + normalisation (Phase 5 writer) ----
+
+    fn normalize_ok(mut settings: Settings) -> Settings {
+        normalize_saving(&mut settings).expect("settings should be valid");
+        settings
+    }
+
+    fn normalize_err(mut settings: Settings) -> String {
+        normalize_saving(&mut settings).expect_err("settings should be rejected")
+    }
+
+    #[test]
+    fn defaults_pass_the_save_time_validation() {
+        normalize_ok(Settings::default());
+    }
+
+    #[test]
+    fn actions_must_be_a_unique_subset_of_the_71_ids() {
+        let mut settings = Settings::default();
+        settings.recording_mode.actions.push(SwitchId::ScreenSaver);
+        assert!(normalize_err(settings.clone()).contains("not a Recording Mode action"));
+        // Drop the invalid id, then duplicate a valid one.
+        settings.recording_mode.actions.pop();
+        settings.recording_mode.actions.push(SwitchId::Dnd);
+        assert!(normalize_err(settings).contains("listed twice"));
+    }
+
+    #[test]
+    fn time_limit_bounds() {
+        let mut settings = Settings::default();
+        settings.recording_mode.time_limit_minutes = Some(0);
+        assert!(normalize_err(settings.clone()).contains("1-480"));
+        settings.recording_mode.time_limit_minutes = Some(480);
+        normalize_ok(settings.clone());
+        settings.recording_mode.time_limit_minutes = Some(481);
+        assert!(normalize_err(settings).contains("1-480"));
+    }
+
+    #[test]
+    fn hotkeys_need_ctrl_alt_or_win() {
+        let mut settings = Settings::default();
+        settings.hotkeys.recording_mode = "Shift+K".into();
+        assert!(normalize_err(settings.clone()).contains("needs Ctrl, Alt or Win"));
+        settings.hotkeys.recording_mode = "Ctrl+K".into();
+        normalize_ok(settings);
+    }
+
+    #[test]
+    fn a_hotkey_clash_is_detected_by_the_parsed_id_not_the_string() {
+        let mut settings = Settings::default();
+        // Same combo spelled differently: both parse to the same id.
+        settings.hotkeys.recording_mode = "Ctrl+K".into();
+        settings
+            .hotkeys
+            .switches
+            .insert("keep-awake".into(), "Ctrl+K".into());
+        let message = normalize_err(settings);
+        assert!(message.contains("already used by"), "message: {message}");
+    }
+
+    #[test]
+    fn escape_is_reserved_for_unlocking_the_keyboard() {
+        let mut settings = Settings::default();
+        settings.hotkeys.recording_mode = "Escape".into();
+        assert!(normalize_err(settings).contains("Escape"));
+    }
+
+    #[test]
+    fn empty_switch_hotkeys_are_removed_and_unknown_ids_rejected() {
+        let mut settings = Settings::default();
+        settings
+            .hotkeys
+            .switches
+            .insert("keep-awake".into(), String::new());
+        let normalized = normalize_ok(settings);
+        assert!(normalized.hotkeys.switches.is_empty());
+
+        let mut settings = Settings::default();
+        settings
+            .hotkeys
+            .switches
+            .insert("not-a-switch".into(), "Ctrl+K".into());
+        assert!(normalize_err(settings).contains("is not a switch"));
+    }
+
+    #[test]
+    fn an_unavailable_binding_parses_but_is_rejected_nowhere() {
+        // A syntactically valid binding that Windows would refuse at
+        // registration is accepted by validation; registration failure is
+        // a runtime error with a message (spec 7.11). The parser spells
+        // the Win key "Super".
+        let mut settings = Settings::default();
+        settings.hotkeys.recording_mode = "Ctrl+Alt+Shift+Super+K".into();
+        normalize_ok(settings);
+    }
+
+    #[test]
+    fn dropdown_fills_missing_switches_into_more_and_dedupes() {
+        let mut settings = Settings::default();
+        settings.dropdown.shown.push(SwitchId::KeepAwake); // duplicate
+        settings.dropdown.more.clear();
+        let normalized = normalize_ok(settings);
+        assert_eq!(
+            normalized
+                .dropdown
+                .shown
+                .iter()
+                .filter(|id| **id == SwitchId::KeepAwake)
+                .count(),
+            1
+        );
+        // Every switch appears exactly once across the three shelves.
+        let mut placed: Vec<String> = normalized
+            .dropdown
+            .shown
+            .iter()
+            .chain(&normalized.dropdown.more)
+            .chain(&normalized.dropdown.hidden)
+            .map(|id| id.to_string())
+            .collect();
+        placed.sort();
+        placed.dedup();
+        assert_eq!(placed.len(), 14);
+    }
+
+    #[test]
+    fn app_names_must_be_bare_exe_names() {
+        let mut settings = Settings::default();
+        settings.apps.stays_on_screen = vec!["C:\\evil\\x.exe".into()];
+        assert!(normalize_err(settings.clone()).contains("executable file name"));
+        settings.apps.stays_on_screen = vec!["Zoom".into()];
+        assert!(normalize_err(settings.clone()).contains("executable file name"));
+        settings.apps.stays_on_screen = vec!["Zoom.exe".into()];
+        normalize_ok(settings);
+    }
+
+    #[test]
+    fn an_app_is_never_on_both_shelves() {
+        let mut settings = Settings::default();
+        settings.apps.stays_on_screen.push("Zoom.exe".into());
+        settings.apps.hidden.push("zoom.exe".into());
+        assert!(normalize_err(settings).contains("both shelves"));
+    }
+
+    #[test]
+    fn app_lists_dedupe_case_insensitively() {
+        let mut settings = Settings::default();
+        settings.apps.stays_on_screen = vec!["Zoom.exe".into(), "ZOOM.EXE".into()];
+        let normalized = normalize_ok(settings);
+        assert_eq!(
+            normalized.apps.stays_on_screen,
+            vec!["Zoom.exe".to_string()]
+        );
+    }
+
+    #[test]
+    fn tray_icon_paths_must_be_absolute_and_dedupe() {
+        let mut settings = Settings::default();
+        settings
+            .tray_icons
+            .visible
+            .push("relative\\icon.exe".into());
+        assert!(normalize_err(settings.clone()).contains("absolute path"));
+        settings.tray_icons.visible = vec![
+            "C:\\Program Files\\x\\x.exe".into(),
+            "c:\\program files\\x\\x.exe".into(),
+        ];
+        let normalized = normalize_ok(settings);
+        assert_eq!(normalized.tray_icons.visible.len(), 1);
+    }
+
+    #[test]
+    fn gradient_must_be_a_preset_id_when_style_is_gradient() {
+        let mut settings = Settings::default();
+        settings.backdrop.style = BackdropStyle::Gradient;
+        settings.backdrop.gradient = Some("nope".into());
+        assert!(normalize_err(settings.clone()).contains("not a gradient preset"));
+        settings.backdrop.gradient = Some("ocean".into());
+        normalize_ok(settings.clone());
+        // Other styles do not read the gradient field.
+        settings.backdrop.style = BackdropStyle::Color;
+        settings.backdrop.gradient = None;
+        normalize_ok(settings);
+    }
+
+    #[test]
+    fn blur_and_dim_have_bounds() {
+        let mut settings = Settings::default();
+        settings.backdrop.blur = 41;
+        assert!(normalize_err(settings.clone()).contains("0-40"));
+        settings.backdrop.blur = 40;
+        settings.backdrop.dim = 81;
+        assert!(normalize_err(settings).contains("0-80"));
+    }
+
+    #[test]
+    fn keep_awake_default_minutes_are_bounded() {
+        let mut settings = Settings::default();
+        settings.keep_awake.default_minutes = 0;
+        assert!(normalize_err(settings.clone()).contains("1-1440"));
+        settings.keep_awake.default_minutes = 1441;
+        assert!(normalize_err(settings).contains("1-1440"));
+    }
+
+    #[test]
+    fn a_full_non_default_settings_roundtrip_survives_the_writer() {
+        // 5.9 evidence: every field set to a non-default value, normalised,
+        // saved and loaded back unchanged.
+        let mut settings = Settings::default();
+        settings.recording_mode.actions = vec![
+            SwitchId::Dnd,
+            SwitchId::KeepAwake,
+            SwitchId::OtherApps,
+            SwitchId::Backdrop,
+            SwitchId::Taskbar,
+        ];
+        settings.recording_mode.countdown = true;
+        settings.recording_mode.time_limit_minutes = Some(90);
+        settings.hotkeys.recording_mode = "Ctrl+Alt+F9".into();
+        settings
+            .hotkeys
+            .switches
+            .insert("keep-awake".into(), "Ctrl+Alt+F10".into());
+        settings.dropdown.shown = vec![SwitchId::Microphone, SwitchId::DarkMode];
+        settings.dropdown.more = vec![
+            SwitchId::Dnd,
+            SwitchId::DesktopIcons,
+            SwitchId::OtherApps,
+            SwitchId::Taskbar,
+            SwitchId::TrayIcons,
+            SwitchId::Backdrop,
+            SwitchId::KeepAwake,
+            SwitchId::AlertSounds,
+            SwitchId::ScreenSaver,
+            SwitchId::LockKeyboard,
+            SwitchId::Bluetooth,
+        ];
+        settings.dropdown.hidden = vec![SwitchId::NightLight];
+        settings.apps.stays_on_screen = vec!["Obs64.exe".into(), "Zoom.exe".into()];
+        settings.apps.hidden = vec!["Spotify.exe".into()];
+        settings.tray_icons.visible = vec!["C:\\Tools\\mytray.exe".into()];
+        settings.backdrop.style = BackdropStyle::Wallpaper;
+        settings.backdrop.color = "#101010".into();
+        settings.backdrop.blur = 12;
+        settings.backdrop.dim = 30;
+        settings.backdrop.monitors = BackdropMonitors::Front;
+        settings.keep_awake.default_minutes = 45;
+        settings.keep_awake.allow_display_off = true;
+        settings.bluetooth.device_id = Some("{0.0.0.00000000}.{a}".into());
+        settings.general.start_with_windows = true;
+        settings.general.check_for_updates = false;
+        settings.general.onboarding_done = true;
+        let normalized = normalize_ok(settings);
+
+        let dir = test_dir("full-roundtrip");
+        save(&normalized, &dir).unwrap();
+        match load(&dir, now()).unwrap() {
+            SettingsRead::Loaded(loaded) => assert_eq!(loaded, normalized),
+            other => panic!("expected Loaded, got {other:?}"),
+        }
     }
 }

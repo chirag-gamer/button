@@ -13,6 +13,14 @@
     <main class="panel">
       <div id="hotkey-warning" class="warning" hidden></div>
       <div id="switch-error" class="warning" role="alert" hidden></div>
+      <p id="countdown-line" class="summary" hidden>
+        <span id="countdown-text"></span>
+        <button id="countdown-cancel" class="link">Cancel</button>
+      </p>
+      <p id="limit-line" class="summary" hidden>
+        <span id="limit-text"></span>
+        <button id="extend" class="link">+15 min</button>
+      </p>
       <section id="card" class="card">
         <div class="card-text">
           <h1>Recording Mode</h1>
@@ -24,6 +32,7 @@
       <section id="shelf" class="shelf"></section>
       <button id="show-all" class="link" hidden>Show all</button>
       <section id="more" class="shelf" hidden></section>
+      <button id="open-settings" class="link">Settings…</button>
     </main>
   </body>
 </html>

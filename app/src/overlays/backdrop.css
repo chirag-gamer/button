@@ -1,11 +1,61 @@
-/* Backdrop styles (FR-20, spec 7.9), linked from backdrop.html so the CSP
-   needs no 'unsafe-inline' for styles (D-082). The colour comes from the
-   window layer (background_color at creation); the page itself stays
-   transparent so it shows through. Nothing interactive lives here. */
+/* Backdrop styles (FR-20, FR-46, spec 7.9), linked from backdrop.html so
+   the CSP needs no 'unsafe-inline' for styles (D-082). The colour comes
+   from the window background layer; the page itself stays transparent so
+   a solid colour shows through unchanged. Gradients are the preset ids
+   validated in Rust (D-087). Nothing interactive lives here. */
 html,
 body {
   background: transparent;
   margin: 0;
   padding: 0;
   overflow: hidden;
+}
+
+/* Picture/wallpaper layer (FR-46): cover the monitor, slightly scaled so
+   the blur never shows frayed edges. blur/dim amounts are applied from
+   backdrop.ts through CSSOM, not per-element styles in the markup. */
+.backdrop-image {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.06);
+}
+
+.backdrop-dim {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+
+/* Gradient presets (FR-46, D-087): one class per validated preset id. */
+.gradient-dusk {
+  background: linear-gradient(135deg, #2b1e4f 0%, #6d3b6e 55%, #c86b5a 100%);
+}
+
+.gradient-ocean {
+  background: linear-gradient(135deg, #0b2545 0%, #134e6f 55%, #1b9aaa 100%);
+}
+
+.gradient-ember {
+  background: linear-gradient(135deg, #2b0a0a 0%, #7a1f1f 55%, #e07a3f 100%);
+}
+
+.gradient-forest {
+  background: linear-gradient(135deg, #0c1f16 0%, #1e4d3b 55%, #4f9d69 100%);
+}
+
+.gradient-violet {
+  background: linear-gradient(135deg, #1b1030 0%, #4b2a80 55%, #8f6bd6 100%);
+}
+
+.gradient-slate {
+  background: linear-gradient(135deg, #17181c 0%, #3a3d45 55%, #6f7480 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop-image {
+    transform: none;
+  }
 }

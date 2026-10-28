@@ -1,0 +1,54 @@
+/* Countdown overlay (FR-41, spec 7.1), imported by overlays/countdown.ts
+   with the shared theme. The window is 240x240, undecorated, always on
+   top, non-focusable and content-protected (countdown.rs), so nothing
+   here is interactive or focusable. No inline styles: the CSP needs no
+   'unsafe-inline' (D-082). */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* countdown.rs creates the window without a transparent background, so
+   the page has to be opaque: an unset body would paint the webview's
+   white default and wash the digit out. No rounded corners for the same
+   reason - an opaque window would show them as square. */
+body {
+  background: var(--bg);
+}
+
+.countdown {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  /* Slightly lighter than the page, so the digit sits on a card rather
+     than floating on the window edge. */
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.digit {
+  margin: 0;
+  font-size: 132px;
+  font-weight: 700;
+  line-height: 1;
+  /* Tabular digits keep 3, 2 and 1 in exactly the same place. */
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+/* Nothing on this page animates or transitions, so prefers-reduced-motion
+   has nothing to switch off (spec 10). */
+
+/* High Contrast replaces the token palette, so name the system pair. */
+@media (forced-colors: active) {
+  .countdown {
+    background: Canvas;
+    border-color: CanvasText;
+  }
+  .digit {
+    color: CanvasText;
+  }
+}

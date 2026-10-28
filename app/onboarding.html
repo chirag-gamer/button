@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to button</title>
+    <!-- Empty data icon: stops the webview's automatic /favicon.ico
+         request, which the asset resolver logs as an error. -->
+    <link rel="icon" href="data:," />
+    <script type="module" src="/src/onboarding/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="wizard">
+      <!-- The step counter is the only progress chrome (FR-52); polite so
+           it announces the move without interrupting the step itself. -->
+      <p id="step-indicator" class="step-indicator" aria-live="polite"></p>
+
+      <div id="step-error" class="warning" role="alert" hidden></div>
+
+      <!-- Step 1: what button does (FR-52). -->
+      <section id="step-1" class="step" aria-labelledby="step-1-title">
+        <h1 id="step-1-title" class="step-title" tabindex="-1">
+          What button does
+        </h1>
+        <p>
+          One click gets your screen recording-ready: it starts Do Not
+          Disturb, hides your desktop icons and other windows, keeps the
+          screen awake, and puts everything back afterwards.
+        </p>
+        <p>
+          <kbd id="intro-hotkey">Alt+R</kbd> does the same from anywhere,
+          without opening the tray menu.
+        </p>
+      </section>
+
+      <!-- Step 2: the Recording Mode hotkey (FR-52, spec 7.11). -->
+      <section id="step-2" class="step" aria-labelledby="step-2-title" hidden>
+        <h1 id="step-2-title" class="step-title" tabindex="-1">
+          Recording Mode hotkey
+        </h1>
+        <p>Press this anywhere to start and stop recording mode.</p>
+        <div class="hotkey-row">
+          <kbd id="hotkey-value" class="hotkey-value">Alt+R</kbd>
+          <button id="hotkey-change" class="secondary" type="button">
+            Change
+          </button>
+        </div>
+        <p id="hotkey-hint" class="hint" hidden>
+          Press the new shortcut, Esc to cancel.
+        </p>
+        <p class="hint">
+          Some apps use Alt+R themselves. If it clashes, pick something
+          else here.
+        </p>
+      </section>
+
+      <!-- Step 3: where the tray icon went (FR-52, D-047). The shared
+           line is always visible; main.ts reveals the block matching
+           getState().os.isWindows11, so the step is never blank. -->
+      <section id="step-3" class="step" aria-labelledby="step-3-title" hidden>
+        <h1 id="step-3-title" class="step-title" tabindex="-1">
+          Where the tray icon is
+        </h1>
+        <p>Windows may hide button's icon in the taskbar overflow.</p>
+        <div id="tray-win11" class="stack" hidden>
+          <p>
+            Click the <span class="caret">^</span> "Show hidden icons"
+            arrow next to the clock: button is in that flyout.
+          </p>
+          <p>
+            To keep it on the taskbar, drag button out of the flyout onto
+            the taskbar. Or open Settings &rsaquo; Personalization &rsaquo;
+            Taskbar &rsaquo; Other system tray settings and turn button on.
+          </p>
+        </div>
+        <div id="tray-win10" class="stack" hidden>
+          <p>
+            Open Settings &rsaquo; Personalization &rsaquo; Taskbar &rsaquo;
+            Select which icons appear on the taskbar and turn button on.
+          </p>
+        </div>
+        <p>
+          Left-click the icon to open the panel, right-click for the tray
+          menu.
+        </p>
+      </section>
+
+      <!-- Step 4: Start with Windows (FR-52, FR-47). -->
+      <section id="step-4" class="step" aria-labelledby="step-4-title" hidden>
+        <h1 id="step-4-title" class="step-title" tabindex="-1">
+          Start with Windows
+        </h1>
+        <p>
+          button needs to be running for the hotkey and the tray icon to
+          work, so starting it with Windows is recommended.
+        </p>
+        <label class="checkbox-row">
+          <input id="start-with-windows" type="checkbox" />
+          <span>Start button when Windows starts</span>
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="back" class="secondary" type="button" hidden>Back</button>
+        <button id="next" class="primary" type="button">Next</button>
+      </div>
+    </main>
+  </body>
+</html>

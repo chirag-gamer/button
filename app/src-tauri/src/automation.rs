@@ -1,6 +1,8 @@
 //! The one dispatcher every trigger goes through: tray menu, tray clicks,
 //! hotkey, dropdown and the command line (spec 2.2, 6.3).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tauri::{AppHandle, Emitter, Manager};
 use time::OffsetDateTime;
 
@@ -12,6 +14,9 @@ use crate::{AppState, SessionStatus, SharedState};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Start,
+    /// The countdown thread's real start (FR-41): bypasses the countdown
+    /// entry so it cannot loop. Never produced by the CLI parser.
+    StartNow,
     Stop,
     Toggle,
     /// Toggle the dropdown window (`button.exe` with no args; the tray
@@ -185,11 +190,55 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
     let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
     let now = OffsetDateTime::now_utc();
 
-    let active = b.engine.state().status == SessionStatus::Active;
+    let status = b.engine.state().status;
+    let active = status == SessionStatus::Active;
+
+    // FR-41: with the countdown on, Start/Toggle from Idle opens the 3·2·1
+    // countdown instead of starting. The countdown thread does the real
+    // start through StartNow; a second press (the hotkey) cancels.
+    if status == SessionStatus::Idle
+        && b.settings.recording_mode.countdown
+        && matches!(action, Action::Start | Action::Toggle)
+    {
+        let generation = COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        b.engine.set_status(SessionStatus::Countdown);
+        drop(b);
+        spawn_countdown(app.clone(), generation);
+        after_change(app);
+        return Ok(());
+    }
+    if status == SessionStatus::Countdown {
+        match action {
+            // Start while counting: already in progress.
+            Action::Start => return Ok(()),
+            // Stop and Toggle cancel the countdown (FR-41 acceptance).
+            Action::Stop | Action::Toggle => {
+                COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
+                b.engine.set_status(SessionStatus::Idle);
+                drop(b);
+                crate::countdown::close(app);
+                after_change(app);
+                return Ok(());
+            }
+            // Restore cancels too, then does its real work below (the
+            // journal is empty during a countdown, so this is the
+            // "nothing to restore" notification).
+            Action::Restore => {
+                COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
+                b.engine.set_status(SessionStatus::Idle);
+                drop(b);
+                crate::countdown::close(app);
+                after_change(app);
+                b = state.lock().unwrap_or_else(|p| p.into_inner());
+            }
+            _ => {}
+        }
+    }
+
     let selected = b.settings.recording_mode.actions.clone();
     let mut started = false;
     let result: Result<(), DispatchError> = match action {
-        Action::Start if !active => {
+        Action::Start | Action::StartNow if !active => {
             let ctx = build_ctx(&b.settings);
             b.engine
                 .start(now, &selected, &ctx)
@@ -197,6 +246,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
                 .map_err(dispatch_err)
         }
         Action::Start => Err(DispatchError::SessionActive),
+        Action::StartNow => Err(DispatchError::SessionActive),
         Action::Stop if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
         Action::Stop => Err(DispatchError::NoSession),
         Action::Toggle if active => b.engine.stop(now).map(|_| ()).map_err(dispatch_err),
@@ -242,6 +292,11 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
             return Ok(());
         }
     };
+    // FR-42: the time limit deadline is set once, when the session starts.
+    if started && let Some(minutes) = b.settings.recording_mode.time_limit_minutes {
+        b.engine
+            .set_time_limit(now + time::Duration::minutes(i64::from(minutes)));
+    }
     drop(b);
     // Sync tray + UI on success and on error alike: the engine may have
     // changed state even when the overall action failed.
@@ -271,6 +326,53 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
         }
     }
     Ok(())
+}
+
+/// One countdown at a time (FR-41): the generation counter cancels a
+/// running countdown when any trigger bumps it.
+static COUNTDOWN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current countdown generation, for the countdown window's
+/// self-check after its build finishes.
+pub(crate) fn countdown_generation() -> u64 {
+    COUNTDOWN_GENERATION.load(Ordering::Relaxed)
+}
+
+/// The countdown thread (FR-41): open the window, emit 3·2·1 one second
+/// apart, then start for real unless any trigger bumped the generation in
+/// the meantime (cancel). The state lock is never held while sleeping.
+fn spawn_countdown(app: AppHandle, generation: u64) {
+    std::thread::spawn(move || {
+        crate::countdown::open(&app, generation);
+        for seconds_left in [3u8, 2, 1] {
+            if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
+                crate::countdown::close(&app);
+                return;
+            }
+            let _ = app.emit(
+                "countdown",
+                serde_json::json!({ "secondsLeft": seconds_left }),
+            );
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        crate::countdown::close(&app);
+        if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        // Back to Idle so the engine's start (which requires Idle) runs;
+        // StartNow bypasses the countdown entry, so this cannot loop.
+        {
+            let state = app.state::<SharedState>();
+            let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
+            if b.engine.state().status != SessionStatus::Countdown {
+                return; // something else changed the state meanwhile
+            }
+            b.engine.set_status(SessionStatus::Idle);
+        }
+        if let Err(message) = run(&app, Action::StartNow) {
+            notify(&app, &message.to_string());
+        }
+    });
 }
 
 /// Failures and CLI results go to a notification (spec 6.3: button has no

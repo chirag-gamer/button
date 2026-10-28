@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "onboarding",
+  "description": "Onboarding wizard: button's own commands, event listening, and closing itself on Done (spec 9)",
+  "windows": ["onboarding"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

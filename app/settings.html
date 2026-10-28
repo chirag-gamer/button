@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>button settings</title>
+    <!-- Empty data icon: stops the webview's automatic /favicon.ico
+         request, which the asset resolver logs as an error. -->
+    <link rel="icon" href="data:," />
+    <script type="module" src="/src/settings/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="window">
+      <!-- Section nav (FR-39): plain buttons with aria-current on the open
+           one; the sections are toggled with the hidden attribute. -->
+      <nav class="nav" aria-label="Settings sections">
+        <h1 class="nav-title">Settings</h1>
+        <button
+          id="nav-general"
+          class="nav-item"
+          type="button"
+          aria-controls="section-general"
+          aria-current="page"
+        >
+          General
+        </button>
+        <button
+          id="nav-recording"
+          class="nav-item"
+          type="button"
+          aria-controls="section-recording"
+        >
+          Recording Mode
+        </button>
+        <button
+          id="nav-switches"
+          class="nav-item"
+          type="button"
+          aria-controls="section-switches"
+        >
+          Switches
+        </button>
+        <button
+          id="nav-hotkeys"
+          class="nav-item"
+          type="button"
+          aria-controls="section-hotkeys"
+        >
+          Hotkeys
+        </button>
+        <button
+          id="nav-backdrop"
+          class="nav-item"
+          type="button"
+          aria-controls="section-backdrop"
+        >
+          Backdrop
+        </button>
+        <button
+          id="nav-about"
+          class="nav-item"
+          type="button"
+          aria-controls="section-about"
+        >
+          About
+        </button>
+      </nav>
+
+      <main class="content">
+        <!-- One error surface for the whole window: saves and list calls
+             report here (task 5.1: role=alert, inline message). -->
+        <div id="error" class="error" role="alert" hidden></div>
+
+        <section
+          id="section-general"
+          class="section"
+          aria-labelledby="nav-general"
+        >
+          <h2>General</h2>
+          <div class="field">
+            <input id="start-with-windows" type="checkbox" />
+            <label for="start-with-windows">Start with Windows</label>
+          </div>
+          <div class="field">
+            <input id="check-updates" type="checkbox" />
+            <label for="check-updates">Check for updates</label>
+          </div>
+          <p class="note">The update check works in a later phase.</p>
+          <div class="field">
+            <button id="show-onboarding-general" class="secondary" type="button">
+              Show onboarding
+            </button>
+          </div>
+        </section>
+
+        <section
+          id="section-recording"
+          class="section"
+          aria-labelledby="nav-recording"
+          hidden
+        >
+          <h2>Recording Mode</h2>
+          <h3>Actions</h3>
+          <p class="note">What Recording Mode changes, in apply order.</p>
+          <div id="actions" class="rows"></div>
+
+          <h3>Options</h3>
+          <div class="field">
+            <input id="countdown" type="checkbox" />
+            <label for="countdown">Show a 3·2·1 countdown before applying</label>
+          </div>
+          <div class="field">
+            <label for="time-limit">Time limit</label>
+            <!-- Filled by main.ts (one source for the FR-42 presets). -->
+            <select id="time-limit"></select>
+          </div>
+
+          <h3>Apps</h3>
+          <p class="note">
+            For Hide Other Apps. Matching ignores case; an app is on one list
+            only.
+          </p>
+          <div class="shelf-block">
+            <h4 id="apps-stays-heading">Stays on Screen</h4>
+            <ul
+              id="apps-stays"
+              class="rows"
+              aria-labelledby="apps-stays-heading"
+            ></ul>
+            <div class="add-row">
+              <label class="visually-hidden" for="apps-stays-pick">
+                Running app to add to Stays on Screen
+              </label>
+              <select id="apps-stays-pick"></select>
+              <label class="visually-hidden" for="apps-stays-manual">
+                Or an executable file name for Stays on Screen
+              </label>
+              <input
+                id="apps-stays-manual"
+                type="text"
+                placeholder="name.exe"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button id="apps-stays-add" class="secondary" type="button">
+                Add app
+              </button>
+            </div>
+          </div>
+          <div class="shelf-block">
+            <h4 id="apps-hidden-heading">Hidden</h4>
+            <ul
+              id="apps-hidden"
+              class="rows"
+              aria-labelledby="apps-hidden-heading"
+            ></ul>
+            <div class="add-row">
+              <label class="visually-hidden" for="apps-hidden-pick">
+                Running app to add to Hidden
+              </label>
+              <select id="apps-hidden-pick"></select>
+              <label class="visually-hidden" for="apps-hidden-manual">
+                Or an executable file name for Hidden
+              </label>
+              <input
+                id="apps-hidden-manual"
+                type="text"
+                placeholder="name.exe"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button id="apps-hidden-add" class="secondary" type="button">
+                Add app
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="section-switches"
+          class="section"
+          aria-labelledby="nav-switches"
+          hidden
+        >
+          <h2>Switches</h2>
+          <h3>Dropdown shelves</h3>
+          <p class="note">
+            Shown lists the switch in the dropdown; Hidden keeps it out. The
+            arrows reorder a shelf.
+          </p>
+          <div id="switch-rows" class="rows"></div>
+
+          <h3>Keep Awake</h3>
+          <div class="field">
+            <label for="keep-awake-minutes">Default duration (minutes)</label>
+            <input
+              id="keep-awake-minutes"
+              type="number"
+              min="1"
+              max="1440"
+              step="1"
+            />
+          </div>
+          <div class="field">
+            <input id="allow-display-off" type="checkbox" />
+            <label for="allow-display-off">Let the screen turn off</label>
+          </div>
+
+          <h3>Bluetooth headphones</h3>
+          <div class="field">
+            <label for="bt-device">Device</label>
+            <!-- Filled by main.ts: None plus the paired devices. -->
+            <select id="bt-device"></select>
+          </div>
+
+          <h3>Tray icons</h3>
+          <p class="note">
+            Third-party icons the Hide Tray Icons switch keeps visible.
+          </p>
+          <div id="tray-icons" class="rows"></div>
+        </section>
+
+        <section
+          id="section-hotkeys"
+          class="section"
+          aria-labelledby="nav-hotkeys"
+          hidden
+        >
+          <h2>Hotkeys</h2>
+          <p class="note">
+            Every shortcut needs Ctrl, Alt or Win so it cannot hijack plain
+            typing. Two shortcuts cannot share a binding.
+          </p>
+          <div id="hotkey-rows" class="rows"></div>
+        </section>
+
+        <section
+          id="section-backdrop"
+          class="section"
+          aria-labelledby="nav-backdrop"
+          hidden
+        >
+          <h2>Backdrop</h2>
+          <fieldset>
+            <legend>Style</legend>
+            <div class="field">
+              <input
+                id="style-color"
+                type="radio"
+                name="backdrop-style"
+                value="color"
+              />
+              <label for="style-color">Solid colour</label>
+            </div>
+            <div class="field">
+              <input
+                id="style-gradient"
+                type="radio"
+                name="backdrop-style"
+                value="gradient"
+              />
+              <label for="style-gradient">Gradient</label>
+            </div>
+            <div class="field">
+              <input
+                id="style-picture"
+                type="radio"
+                name="backdrop-style"
+                value="picture"
+              />
+              <label for="style-picture">Picture</label>
+            </div>
+            <div class="field">
+              <input
+                id="style-wallpaper"
+                type="radio"
+                name="backdrop-style"
+                value="wallpaper"
+              />
+              <label for="style-wallpaper">Windows wallpaper</label>
+            </div>
+          </fieldset>
+
+          <div id="colour-block" class="option-block">
+            <h3>Colour</h3>
+            <div id="swatches" class="swatches"></div>
+            <div class="field">
+              <label for="custom-colour">Custom colour</label>
+              <input id="custom-colour" type="color" />
+            </div>
+          </div>
+
+          <div id="gradient-block" class="option-block">
+            <h3>Gradient</h3>
+            <div id="gradients" class="gradients"></div>
+          </div>
+
+          <div id="picture-block" class="option-block">
+            <h3>Picture</h3>
+            <div class="field">
+              <button id="choose-picture" class="secondary" type="button">
+                Choose picture…
+              </button>
+            </div>
+            <p id="picture-path" class="note"></p>
+          </div>
+
+          <div class="option-block">
+            <h3>Effect</h3>
+            <div class="field">
+              <label for="backdrop-blur">Blur</label>
+              <input
+                id="backdrop-blur"
+                type="range"
+                min="0"
+                max="40"
+                step="1"
+              />
+              <span id="blur-value" class="value"></span>
+            </div>
+            <div class="field">
+              <label for="backdrop-dim">Dim</label>
+              <input id="backdrop-dim" type="range" min="0" max="80" step="1" />
+              <span id="dim-value" class="value"></span>
+            </div>
+          </div>
+
+          <fieldset>
+            <legend>Monitors</legend>
+            <div class="field">
+              <input
+                id="monitors-all"
+                type="radio"
+                name="backdrop-monitors"
+                value="all"
+              />
+              <label for="monitors-all">All monitors</label>
+            </div>
+            <div class="field">
+              <input
+                id="monitors-front"
+                type="radio"
+                name="backdrop-monitors"
+                value="front"
+              />
+              <label for="monitors-front">Only the front app's monitor</label>
+            </div>
+          </fieldset>
+        </section>
+
+        <section
+          id="section-about"
+          class="section"
+          aria-labelledby="nav-about"
+          hidden
+        >
+          <h2>About</h2>
+          <p class="about-line">button <span id="app-version"></span></p>
+          <p class="about-line">MIT license</p>
+          <p class="about-line">
+            <!-- Plain text, not a link: there is no opener plugin and the CSP
+                 allows no remote navigation (spec 9). -->
+            <span id="repo-url" class="selectable"
+              >https://github.com/chirag-gamer/button</span
+            >
+          </p>
+          <div class="field">
+            <button id="show-onboarding-about" class="secondary" type="button">
+              Show onboarding
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

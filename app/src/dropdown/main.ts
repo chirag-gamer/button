@@ -11,14 +11,18 @@ import {
   OffAfter,
   Settings,
   SwitchId,
+  extendRecording,
   getState,
   getSettings,
   listBtDevices,
+  onCountdown,
   onSettingsChanged,
   onStateChanged,
+  openSettings,
   setBluetoothDevice,
   setKeepAwakeOptions,
   setSwitch,
+  stopRecording,
   toggleRecording,
 } from "../shared/ipc";
 import { formatElapsed } from "../shared/format";
@@ -86,6 +90,21 @@ const showAllButton = document.getElementById("show-all") as HTMLButtonElement;
 const more = document.getElementById("more")!;
 const summary = document.getElementById("switch-summary")!;
 const switchError = document.getElementById("switch-error")!;
+const countdownLine = document.getElementById("countdown-line")!;
+const countdownText = document.getElementById("countdown-text")!;
+const countdownCancel = document.getElementById(
+  "countdown-cancel",
+) as HTMLButtonElement;
+const limitLine = document.getElementById("limit-line")!;
+const limitText = document.getElementById("limit-text")!;
+const extendButton = document.getElementById("extend") as HTMLButtonElement;
+const openSettingsButton = document.getElementById(
+  "open-settings",
+) as HTMLButtonElement;
+
+// The latest countdown tick (FR-41); the dropdown shows it while the
+// session status is "countdown".
+let countdownSeconds = 3;
 
 let errorTimer: number | undefined;
 
@@ -136,6 +155,27 @@ function render(): void {
   const on = counted.filter((s) => s.on).length;
   summary.textContent = `${on} on · ${counted.length - on} off`;
   summary.hidden = counted.length === 0;
+
+  // FR-41: while the countdown runs, show the tick and a Cancel.
+  if (state.session.status === "countdown") {
+    countdownText.textContent = `Starting in ${countdownSeconds}…`;
+    countdownLine.hidden = false;
+  } else {
+    countdownLine.hidden = true;
+  }
+
+  // FR-42: with a time limit, show the remaining time and the extend
+  // action (desktop notifications have no buttons, D-090).
+  const endsAt = state.session.endsAt
+    ? new Date(state.session.endsAt).getTime()
+    : undefined;
+  if (active && endsAt !== undefined) {
+    const remaining = Math.max(0, Math.round((endsAt - Date.now()) / 1000));
+    limitText.textContent = `Ends in ${formatElapsed(remaining)}`;
+    limitLine.hidden = false;
+  } else {
+    limitLine.hidden = true;
+  }
 
   // An open menu must survive the once-a-second state-changed re-render
   // (replaceChildren would destroy the row it lives in); the shelves
@@ -461,6 +501,46 @@ startRestore.addEventListener("click", async () => {
 showAllButton.addEventListener("click", () => {
   showAll = !showAll;
   render();
+});
+
+// FR-41: cancelling the countdown is a Stop (the dispatcher cancels the
+// countdown instead of stopping a session that never started).
+countdownCancel.addEventListener("click", async () => {
+  try {
+    state = await stopRecording();
+    render();
+  } catch (e) {
+    console.error(e);
+    state = await getState();
+    render();
+  }
+});
+
+// FR-42: push the time limit back 15 minutes.
+extendButton.addEventListener("click", async () => {
+  try {
+    state = await extendRecording(15);
+    render();
+  } catch (e) {
+    console.error(e);
+    state = await getState();
+    render();
+  }
+});
+
+// FR-39: the settings window opens next to the dropdown; the dropdown
+// hides on the blur that follows.
+openSettingsButton.addEventListener("click", () => {
+  void openSettings();
+});
+
+// FR-41: the countdown ticks arrive as events (the ticker does not run
+// during a countdown).
+void onCountdown((secondsLeft) => {
+  countdownSeconds = secondsLeft;
+  if (state?.session.status === "countdown") {
+    render();
+  }
 });
 
 // Blur hides the whole dropdown (tray.rs): close any open menu too, or

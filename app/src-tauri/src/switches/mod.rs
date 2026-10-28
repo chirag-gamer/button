@@ -19,10 +19,10 @@ mod keep_awake;
 pub(crate) mod lock_keyboard;
 mod microphone;
 mod night_light;
-mod other_apps;
+pub(crate) mod other_apps;
 mod screen_saver;
 mod taskbar;
-mod tray_icons;
+pub(crate) mod tray_icons;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

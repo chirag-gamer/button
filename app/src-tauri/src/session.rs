@@ -169,6 +169,20 @@ impl SessionEngine {
         &self.session
     }
 
+    /// Countdown transitions (FR-41), driven only by automation: Idle →
+    /// Countdown on entry, Countdown → Idle on cancel, Countdown → Idle
+    /// right before the countdown thread's real start (which resets the
+    /// whole SessionState anyway).
+    pub fn set_status(&mut self, status: SessionStatus) {
+        self.session.status = status;
+    }
+
+    /// Set the time-limit deadline right after a start (FR-42). The
+    /// ticker fires the stop when the deadline is due.
+    pub fn set_time_limit(&mut self, ends_at: OffsetDateTime) {
+        self.session.ends_at = Some(ends_at);
+    }
+
     fn switch(&self, id: SwitchId) -> Option<&dyn Switch> {
         self.switches
             .iter()
