@@ -48,9 +48,14 @@ pub fn open(app: &AppHandle, generation: u64) {
             let _ = window.close();
             return;
         }
-        if let Some((x, y)) = centred_position(&app2) {
-            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-        }
+        // Positioning runs on the main thread: primary_monitor is a
+        // blocking getter off it (the same rule backdrop::show follows).
+        let app3 = app2.clone();
+        let _ = app2.run_on_main_thread(move || {
+            if let Some((x, y)) = centred_position(&app3) {
+                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+            }
+        });
     });
 }
 
@@ -64,11 +69,12 @@ pub fn close(app: &AppHandle, generation: u64) {
 }
 
 /// Window top-left so the 240×240 overlay sits centred on the monitor
-/// the front app is on, else the primary monitor.
+/// the front app is on, else the primary monitor. Runs on the main
+/// thread only (primary_monitor is a blocking getter elsewhere).
 #[cfg(not(test))]
 fn centred_position(app: &AppHandle) -> Option<(i32, i32)> {
     const SIZE: i32 = 240;
-    let monitor_rect = front_monitor_rect(app)?;
+    let monitor_rect = front_monitor_rect(app).or_else(|| primary_rect(app))?;
     let centre_x = monitor_rect.0 + monitor_rect.2 as i32 / 2;
     let centre_y = monitor_rect.1 + monitor_rect.3 as i32 / 2;
     Some((centre_x - SIZE / 2, centre_y - SIZE / 2))
@@ -86,7 +92,20 @@ fn front_monitor_rect(_app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
     crate::backdrop::monitor_rect_of(hwnd)
 }
 
+#[cfg(all(not(test), windows))]
+fn primary_rect(app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
+    app.primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| crate::backdrop::monitor_rect(&m))
+}
+
 #[cfg(all(not(test), not(windows)))]
 fn front_monitor_rect(_app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
+    None
+}
+
+#[cfg(all(not(test), not(windows)))]
+fn primary_rect(_app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
     None
 }

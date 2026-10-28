@@ -244,7 +244,7 @@ pub fn show() -> Result<(), String> {
 
 /// Physical bounds of a Tauri monitor as a comparable tuple.
 #[cfg(not(test))]
-fn monitor_rect(monitor: &tauri::Monitor) -> MonitorRect {
+pub(crate) fn monitor_rect(monitor: &tauri::Monitor) -> MonitorRect {
     (
         monitor.position().x,
         monitor.position().y,

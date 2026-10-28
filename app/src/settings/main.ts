@@ -751,7 +751,10 @@ function hotkeyRow(key: string, label: string, binding: string): HTMLElement {
     "icon",
     `Clear the ${label} shortcut`,
   );
-  clear.disabled = binding === "";
+  // Switch hotkeys can be cleared; the recording-mode binding is
+  // required by the core (FR-9: the toggle must keep a binding), so its
+  // Clear would only ever produce an error.
+  clear.disabled = binding === "" || key === "recordingMode";
   clear.addEventListener("click", () => {
     void assignHotkey(key, "");
   });

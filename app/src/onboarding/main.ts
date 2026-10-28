@@ -7,7 +7,13 @@
 // onboarding.rs; this page never writes that flag.
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { eventToAccelerator } from "../shared/accel";
-import { Settings, getSettings, getState, saveSettings } from "../shared/ipc";
+import {
+  Settings,
+  getSettings,
+  getState,
+  onSettingsChanged,
+  saveSettings,
+} from "../shared/ipc";
 import "./onboarding.css";
 import "../shared/theme.css";
 
@@ -234,6 +240,19 @@ hotkeyChange.addEventListener("click", startCapture);
 
 startWithWindows.addEventListener("change", () => {
   void saveStartWithWindows();
+});
+
+// Keep the snapshot current (spec 6.1: the core is the writer): a save
+// from the Settings window while onboarding is open must not be
+// overwritten by onboarding's next full-object save. While one of this
+// page's own saves is in flight, its returned copy is the authoritative
+// update instead.
+void onSettingsChanged((next) => {
+  if (!savingHotkeys && !savingGeneral) {
+    settings = next;
+    renderHotkey();
+    renderControls();
+  }
 });
 
 // Step 3's text depends on the OS, not on a setting. A failed read leaves
