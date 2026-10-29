@@ -85,7 +85,10 @@
             <input id="check-updates" class="switch" type="checkbox" />
             <label for="check-updates">Check for updates</label>
           </div>
-          <p class="note">The update check works in a later phase.</p>
+          <p class="note">
+            When this is on, button asks GitHub for a newer version each time it
+            starts. That is the only time button goes online.
+          </p>
           <div class="field">
             <button id="show-onboarding-general" class="secondary" type="button">
               Show onboarding
@@ -374,6 +377,26 @@
         >
           <h2>About</h2>
           <p class="about-line">button <span id="app-version"></span></p>
+          <div class="field">
+            <button id="check-update" class="secondary" type="button">
+              Check for updates
+            </button>
+            <button id="install-update" class="secondary" type="button" hidden>
+              Install update
+            </button>
+          </div>
+          <p id="update-status" class="note" role="status" aria-live="polite"></p>
+          <div class="field">
+            <button id="copy-diagnostics" class="secondary" type="button">
+              Copy diagnostic report
+            </button>
+          </div>
+          <p class="note">
+            For bug reports: the app version, Windows build, which switches
+            work on this PC and the last 200 log lines. No window titles or
+            file paths.
+          </p>
+          <p id="diagnostics-status" class="note" role="status" aria-live="polite"></p>
           <p class="about-line">MIT license</p>
           <p class="about-line">
             <!-- Plain text, not a link: there is no opener plugin and the CSP

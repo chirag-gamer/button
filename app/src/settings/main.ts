@@ -16,8 +16,11 @@ import {
   Settings,
   SwitchId,
   TrayIconInfo,
+  checkUpdate,
+  copyDiagnostics,
   getSettings,
   getState,
+  installUpdate,
   listApps,
   listBtDevices,
   listTrayIcons,
@@ -1014,6 +1017,65 @@ for (const button of onboardingButtons) {
   });
 }
 
+// ---- Updates and the diagnostic report (FR-22, FR-24) ----
+
+const checkUpdateButton = byId<HTMLButtonElement>("check-update");
+const installUpdateButton = byId<HTMLButtonElement>("install-update");
+const updateStatus = byId<HTMLParagraphElement>("update-status");
+const copyDiagnosticsButton = byId<HTMLButtonElement>("copy-diagnostics");
+const diagnosticsStatus = byId<HTMLParagraphElement>("diagnostics-status");
+
+/** The install button follows AppState.update, where the launch check,
+ * the tray and this window all put a found update. */
+function renderUpdate(): void {
+  const version = state?.update?.version;
+  installUpdateButton.hidden = version === undefined;
+  if (version !== undefined) {
+    installUpdateButton.textContent = `Install update ${version}`;
+  }
+}
+
+checkUpdateButton.addEventListener("click", () => {
+  checkUpdateButton.disabled = true;
+  updateStatus.textContent = "Checking for updates…";
+  checkUpdate()
+    .then((result) => {
+      updateStatus.textContent = result.available
+        ? `Version ${result.version ?? ""} is available.`
+        : "button is up to date.";
+    })
+    .catch((e: unknown) => {
+      updateStatus.textContent = message(e);
+    })
+    .finally(() => {
+      checkUpdateButton.disabled = false;
+    });
+});
+
+installUpdateButton.addEventListener("click", () => {
+  installUpdateButton.disabled = true;
+  updateStatus.textContent =
+    "Downloading the update. button closes, installs it and starts again.";
+  installUpdate()
+    .catch((e: unknown) => {
+      updateStatus.textContent = message(e);
+    })
+    .finally(() => {
+      installUpdateButton.disabled = false;
+    });
+});
+
+copyDiagnosticsButton.addEventListener("click", () => {
+  diagnosticsStatus.textContent = "";
+  copyDiagnostics()
+    .then(() => {
+      diagnosticsStatus.textContent = "Copied to the clipboard.";
+    })
+    .catch((e: unknown) => {
+      diagnosticsStatus.textContent = message(e);
+    });
+});
+
 // ---- Loading ----
 
 /** Lists and the version load once; a failed list only costs its section
@@ -1061,6 +1123,7 @@ async function init(): Promise<void> {
     onStateChanged((next) => {
       initialReceivedState = next;
       state = next;
+      renderUpdate();
       const signature = availabilitySignature();
       if (signature === lastAvailability) return;
       lastAvailability = signature;
@@ -1079,6 +1142,7 @@ async function init(): Promise<void> {
     if (initialReceivedState === undefined) {
       state = initialState;
     }
+    renderUpdate();
     render();
   } catch (e) {
     showError(message(e));

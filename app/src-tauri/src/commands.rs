@@ -2,6 +2,7 @@
 //! quick-switch set: set_switch, unlock_keyboard, list_bt_devices,
 //! set_bluetooth_device, set_keep_awake_options (D-078). Read-only
 //! get_settings stays; save_settings arrives with the Settings UI (Phase 5).
+//! Phase 6 adds check_update, install_update and copy_diagnostics.
 //! Typed wrappers live in `app/src/shared/ipc.ts`.
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -330,6 +331,45 @@ pub fn fit_dropdown(window: tauri::WebviewWindow, height: f64) -> IpcResult<()> 
 #[tauri::command]
 pub async fn open_onboarding(app: AppHandle) {
     crate::onboarding::open(&app);
+}
+
+/// `check_update`'s result (spec 6.1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpdateCheck {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Check GitHub for a newer release (FR-22). Works with the launch check
+/// turned off too: the user asked for it. A network failure is OS_ERROR.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> IpcResult<UpdateCheck> {
+    let version = crate::updater::check(&app)
+        .await
+        .map_err(IpcError::OsError)?;
+    Ok(UpdateCheck {
+        available: version.is_some(),
+        version,
+    })
+}
+
+/// Install the update the last check found (FR-22, spec 7.12). Refused
+/// with SESSION_ACTIVE while a session runs or the journal holds anything;
+/// on success the app exits and the installer starts the new version.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> IpcResult<()> {
+    crate::updater::install(&app).await.map_err(|e| match e {
+        crate::updater::InstallError::SessionActive => IpcError::SessionActive(e.to_string()),
+        crate::updater::InstallError::NoUpdate => IpcError::NotAvailable(e.to_string()),
+        crate::updater::InstallError::Failed(_) => IpcError::OsError(e.to_string()),
+    })
+}
+
+/// Copy the diagnostic report to the clipboard (FR-24).
+#[tauri::command]
+pub fn copy_diagnostics(app: AppHandle) -> IpcResult<()> {
+    crate::diagnostics::copy_report(&app).map_err(IpcError::OsError)
 }
 
 /// One running app for the shelves (FR-43): unique exe basename, name is

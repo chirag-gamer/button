@@ -1,6 +1,6 @@
 [package]
 name = "button"
-version = "0.1.0"
+version = "1.0.0"
 description = "A free, open-source Windows tray app that gets your screen recording-ready in one click and safely puts everything back"
 authors = ["chirag-gamer"]
 edition = "2024"
@@ -22,6 +22,9 @@ tauri-plugin-global-shortcut = "2.4.1"
 tauri-plugin-log = "2.10.1"
 tauri-plugin-notification = "2.7.0"
 tauri-plugin-single-instance = "2.5.4"
+# Windows TLS (SChannel) instead of the default rustls + ring, and no zip
+# support: v2 updater artifacts sign the NSIS installer itself (D-100).
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls", "system-proxy"] }
 # Re-exported types of tauri-plugin-global-shortcut 2.4.1; used directly for
 # save-time hotkey validation (mods/Code access, clash ids).
 global-hotkey = "0.8"
@@ -46,7 +49,9 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_System_Power",
     "Win32_System_Threading",

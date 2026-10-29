@@ -1,6 +1,6 @@
 //! Tray icon, menu and the 1 s ticker (spec 2.1, 7.7; FR-1, FR-13,
-//! FR-48). D-086: "Check for updates" and "Copy diagnostic report" land
-//! in Phase 6 with their features.
+//! FR-48). "Check for updates" (FR-22) and "Copy diagnostic report"
+//! (FR-24) came in Phase 6 with their features (D-086).
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -23,6 +23,9 @@ pub struct TrayHandles {
     /// dispatches a Switch toggle; `update_tray` re-syncs the check from
     /// the real state in case an apply failed.
     pub switch_items: Vec<(SwitchId, CheckMenuItem<Wry>)>,
+    /// "Check for updates", or "Install update X.Y.Z" once a check found
+    /// one (FR-22).
+    pub update_item: MenuItem<Wry>,
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
@@ -34,6 +37,14 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         None::<&str>,
     )?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let update_item = MenuItem::with_id(app, "update", "Check for updates", true, None::<&str>)?;
+    let diagnostics = MenuItem::with_id(
+        app,
+        "diagnostics",
+        "Copy diagnostic report",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
     // One check item per switch, registry order = the engine's row order
@@ -67,7 +78,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     if !switch_items.is_empty() {
         items.push(&separator2);
     }
+    let separator3 = PredefinedMenuItem::separator(app)?;
     items.push(&settings);
+    items.push(&update_item);
+    items.push(&diagnostics);
+    items.push(&separator3);
     items.push(&quit);
     let menu = Menu::with_items(app, &items)?;
 
@@ -84,6 +99,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                 }
             }
             "settings" => crate::settings_window::open(app, None),
+            "update" => crate::updater::tray_action(app),
+            "diagnostics" => match crate::diagnostics::copy_report(app) {
+                Ok(()) => automation::notify(app, "Diagnostic report copied to the clipboard"),
+                Err(message) => automation::notify(app, &message),
+            },
             "quit" => app.exit(0),
             id => {
                 if let Some(switch_id) = id.strip_prefix("switch:") {
@@ -136,6 +156,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         icon,
         start_restore_item,
         switch_items,
+        update_item,
     })
 }
 
@@ -205,6 +226,10 @@ pub fn update_tray(app: &AppHandle) {
     let state = app.state::<SharedState>();
     let b = state.lock().unwrap_or_else(|p| p.into_inner());
     let active = b.engine.state().status == SessionStatus::Active;
+    let update_text = match &b.update {
+        Some(update) => format!("Install update {}", update.version),
+        None => "Check for updates".to_string(),
+    };
     let tooltip = if active {
         let started = b
             .engine
@@ -226,6 +251,9 @@ pub fn update_tray(app: &AppHandle) {
     } else {
         "Start Recording Mode"
     });
+    if handles.update_item.text().ok().as_deref() != Some(update_text.as_str()) {
+        let _ = handles.update_item.set_text(update_text);
+    }
     // Re-sync the switch check items from the real state: a menu click
     // flips its own check, but a failed apply must not leave the menu
     // lying (FR-48 acceptance). Set only on change.
@@ -322,7 +350,7 @@ pub fn start_ticker(app: AppHandle) {
             drop(b);
             let (due, almost_due, started) = decision.unwrap_or_default();
             if due {
-                automation::notify(&app, "Time limit reached — everything is back");
+                automation::notify(&app, "Time limit reached. Everything is back.");
                 if let Err(message) = automation::run(&app, Action::Stop) {
                     automation::notify(&app, &message.to_string());
                 }
