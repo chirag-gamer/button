@@ -1,18 +1,26 @@
-//! Tray icon, menu and the 1 s ticker (spec 2.1, 7.7; FR-1, FR-13).
+//! Tray icon, menu and the 1 s ticker (spec 2.1, 7.7; FR-1, FR-13,
+//! FR-48). D-086: "Check for updates" and "Copy diagnostic report" land
+//! in Phase 6 with their features.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::automation::{self, Action};
+use crate::switches::SwitchId;
 use crate::{SessionStatus, SharedState};
 
 /// Managed handles the dispatcher needs to refresh the tray.
 pub struct TrayHandles {
     pub icon: TrayIcon,
     pub start_restore_item: MenuItem<Wry>,
+    /// One check item per switch, registry order (FR-48): the click
+    /// dispatches a Switch toggle; `update_tray` re-syncs the check from
+    /// the real state in case an apply failed.
+    pub switch_items: Vec<(SwitchId, CheckMenuItem<Wry>)>,
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
@@ -23,9 +31,43 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
         true,
         None::<&str>,
     )?;
-    let settings = MenuItem::with_id(app, "settings", "Settings", false, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&start_restore_item, &settings, &quit])?;
+
+    // One check item per switch, registry order = the engine's row order
+    // (FR-48 says all switches, hidden-shelf ones included).
+    let state = app.state::<SharedState>();
+    let b = state.lock().unwrap_or_else(|p| p.into_inner());
+    let rows = b.engine.switch_states();
+    drop(b);
+    let mut switch_items = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("switch:{}", row.id),
+            switch_display_name(row.id),
+            true,
+            row.on,
+            None::<&str>,
+        )?;
+        switch_items.push((row.id, item));
+    }
+
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&start_restore_item];
+    let separator = PredefinedMenuItem::separator(app)?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
+    if !switch_items.is_empty() {
+        items.push(&separator);
+    }
+    for (_, item) in &switch_items {
+        items.push(item);
+    }
+    if !switch_items.is_empty() {
+        items.push(&separator2);
+    }
+    items.push(&settings);
+    items.push(&quit);
+    let menu = Menu::with_items(app, &items)?;
 
     let icon = TrayIconBuilder::with_id("main")
         // The menu must not also open on a left click (spec 2.5 instruction).
@@ -39,8 +81,24 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                     automation::notify(app, &message.to_string());
                 }
             }
+            "settings" => crate::settings_window::open(app),
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(switch_id) = id.strip_prefix("switch:") {
+                    let Ok(switch_id) = automation::parse_switch_id(switch_id) else {
+                        return;
+                    };
+                    if let Err(message) = automation::run(
+                        app,
+                        Action::Switch {
+                            id: switch_id,
+                            on: crate::automation::SwitchOnOff::Toggle,
+                        },
+                    ) {
+                        automation::notify(app, &message.to_string());
+                    }
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| match event {
             // The dropdown's visibility is sampled on the press and acted on
@@ -75,11 +133,34 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     Ok(TrayHandles {
         icon,
         start_restore_item,
+        switch_items,
     })
 }
 
 pub fn idle_icon() -> tauri::image::Image<'static> {
     tauri::include_image!("icons/tray-idle.png")
+}
+
+/// The tray menu's switch names (FR-48): the same display names as the
+/// dropdown (FR-3's names, spec 7.5 catalogue, mirrored from
+/// dropdown/main.ts LABELS).
+fn switch_display_name(id: SwitchId) -> &'static str {
+    match id {
+        SwitchId::Dnd => "Do Not Disturb",
+        SwitchId::DesktopIcons => "Hide Desktop Icons",
+        SwitchId::OtherApps => "Hide Other Apps",
+        SwitchId::Taskbar => "Hide Taskbar",
+        SwitchId::TrayIcons => "Hide Tray Icons",
+        SwitchId::Backdrop => "Backdrop",
+        SwitchId::KeepAwake => "Keep Awake",
+        SwitchId::AlertSounds => "Mute Alert Sounds",
+        SwitchId::DarkMode => "Dark Mode",
+        SwitchId::NightLight => "Night Light",
+        SwitchId::ScreenSaver => "Screen Saver",
+        SwitchId::Microphone => "Mute Microphone",
+        SwitchId::LockKeyboard => "Lock Keyboard",
+        SwitchId::Bluetooth => "Bluetooth Headphones",
+    }
 }
 
 pub fn active_icon() -> tauri::image::Image<'static> {
@@ -116,6 +197,26 @@ pub fn update_tray(app: &AppHandle) {
     } else {
         "Start Recording Mode"
     });
+    // Re-sync the switch check items from the real state: a menu click
+    // flips its own check, but a failed apply must not leave the menu
+    // lying (FR-48 acceptance). Set only on change.
+    let state = app.state::<SharedState>();
+    let b = state.lock().unwrap_or_else(|p| p.into_inner());
+    let rows = b.engine.switch_states();
+    drop(b);
+    for (id, item) in &handles.switch_items {
+        let Some(row) = rows.iter().find(|r| r.id == *id) else {
+            continue;
+        };
+        let on = row.on;
+        let enabled = row.availability == crate::switches::Availability::Available;
+        if item.is_checked().unwrap_or(!on) != on {
+            let _ = item.set_checked(on);
+        }
+        if item.is_enabled().unwrap_or(!enabled) != enabled {
+            let _ = item.set_enabled(enabled);
+        }
+    }
 }
 
 /// Tooltip time: m:ss under an hour, h:mm:ss from an hour on (FR-13).
@@ -131,10 +232,40 @@ pub fn format_elapsed(total_seconds: i64) -> String {
     }
 }
 
+/// The session whose "1 minute left" notice already ran (D-090), keyed by
+/// startedAt so a new session re-arms it. `extend_recording` clears it.
+static LIMIT_NOTICE_GIVEN: Mutex<Option<i64>> = Mutex::new(None);
+
+/// Pure part of the ticker's time-limit handling (FR-42, D-090;
+/// unit-tested): `(due, "1 minute left" due, session identity)` for an
+/// active session with a deadline, None otherwise. A deadline in the
+/// past is due; the notice covers the last 60 s.
+fn limit_decision(
+    status: SessionStatus,
+    ends_at: Option<time::OffsetDateTime>,
+    started_at: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> Option<(bool, bool, i64)> {
+    if status != SessionStatus::Active {
+        return None;
+    }
+    let ends = ends_at?;
+    let started = started_at.map(|t| t.unix_timestamp()).unwrap_or_default();
+    let remaining = (ends - now).whole_seconds();
+    Some((now >= ends, remaining > 0 && remaining <= 60, started))
+}
+
+/// Re-arm the "1 minute left" notice (D-090): an extended session warns
+/// again before its new end.
+pub fn rearm_limit_notice() {
+    *LIMIT_NOTICE_GIVEN.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 /// The 1 s ticker: a plain std::thread with a 1 s sleep (no tokio dep). It
 /// only works while a session is active or a timer is pending (spec 7.7,
-/// §10); timers fire here (FR-28). The emit uses the engine's row cache,
-/// so the ticker itself never reads a switch.
+/// §10); timers fire here (FR-28), and so does a due time limit (FR-42).
+/// The emit uses the engine's row cache, so the ticker itself never reads
+/// a switch.
 pub fn start_ticker(app: AppHandle) {
     std::thread::spawn(move || {
         loop {
@@ -152,7 +283,28 @@ pub fn start_ticker(app: AppHandle) {
                 // engine is locked. Latency-only, no correctness impact.
                 b.engine.fire_due_timers(time::OffsetDateTime::now_utc());
             }
+            // FR-42: a due time limit stops the session. Read after the
+            // timers so a due timer and the limit both get their turn.
+            let now = time::OffsetDateTime::now_utc();
+            let decision = {
+                let session = b.engine.state();
+                limit_decision(session.status, session.ends_at, session.started_at, now)
+            };
             drop(b);
+            let (due, almost_due, started) = decision.unwrap_or_default();
+            if due {
+                automation::notify(&app, "Time limit reached — everything is back");
+                if let Err(message) = automation::run(&app, Action::Stop) {
+                    automation::notify(&app, &message.to_string());
+                }
+            } else if almost_due {
+                let mut given = LIMIT_NOTICE_GIVEN.lock().unwrap_or_else(|p| p.into_inner());
+                if *given != Some(started) {
+                    *given = Some(started);
+                    drop(given);
+                    automation::notify(&app, "1 minute left in Recording Mode");
+                }
+            }
             if active || timers {
                 automation::after_change(&app);
             }
@@ -285,7 +437,7 @@ pub fn attach_blur_close(window: &tauri::WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_elapsed;
+    use super::*;
     use crate::switches::{SwitchId, build_registry};
 
     #[test]
@@ -368,5 +520,52 @@ mod tests {
             .map(|s| s.id())
             .collect();
         assert_eq!(actions, vec![SwitchId::ScreenSaver]);
+    }
+
+    fn at(minutes_after_epoch: i64) -> time::OffsetDateTime {
+        time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(minutes_after_epoch)
+    }
+
+    #[test]
+    fn limit_decision_covers_due_and_the_last_minute() {
+        // A 1-minute limit starting at t0: due at t0+1min, the notice is
+        // immediately live (remaining <= 60 s).
+        let start = at(0);
+        let ends = at(1);
+        assert_eq!(
+            limit_decision(SessionStatus::Active, Some(ends), Some(start), at(0)),
+            Some((false, true, 0))
+        );
+        // The notice fired; after extend the same session is outside the
+        // last minute and re-arming is the caller's job.
+        assert_eq!(
+            limit_decision(SessionStatus::Active, Some(at(2)), Some(start), at(0)),
+            Some((false, false, 0))
+        );
+        // Due: the deadline passed.
+        assert_eq!(
+            limit_decision(SessionStatus::Active, Some(ends), Some(start), at(2)),
+            Some((true, false, 0))
+        );
+    }
+
+    #[test]
+    fn limit_decision_needs_an_active_session_and_a_deadline() {
+        assert_eq!(limit_decision(SessionStatus::Idle, None, None, at(0)), None);
+        assert_eq!(
+            limit_decision(SessionStatus::Active, None, Some(at(0)), at(0)),
+            None
+        );
+        assert_eq!(
+            limit_decision(SessionStatus::Countdown, Some(at(1)), Some(at(0)), at(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn limit_decision_keys_the_notice_on_the_session_start() {
+        // `at()` is minutes since the epoch, so startedAt = 30 min = 1800 s.
+        let decision = limit_decision(SessionStatus::Active, Some(at(61)), Some(at(30)), at(0));
+        assert_eq!(decision, Some((false, false, 1800)));
     }
 }

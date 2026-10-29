@@ -224,8 +224,8 @@ fn outcome(restored: usize, user_changed: usize) -> RestoreOutcome {
 /// owner, no `WS_EX_TOOLWINDOW`, not DWM-cloaked, not button's process.
 /// Elevated processes are skipped in read ([D-070]); a failed token read
 /// counts as elevated, and the check is skipped when button itself is
-/// elevated.
-fn candidates() -> Result<Vec<Entry>, SwitchError> {
+/// elevated. Also the source of `list_apps` (FR-43).
+pub(crate) fn candidates() -> Result<Vec<Entry>, SwitchError> {
     let mut found: Vec<(HWND, u32)> = Vec::new();
     unsafe {
         EnumWindows(Some(collect), LPARAM(&mut found as *mut _ as isize)).map_err(|e| {

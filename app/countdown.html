@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>button</title>
+    <!-- Empty data icon: stops the webview's automatic /favicon.ico
+         request, which the asset resolver logs as an error. -->
+    <link rel="icon" href="data:," />
+    <script type="module" src="/src/overlays/countdown.ts" defer></script>
+  </head>
+  <body>
+    <main class="countdown">
+      <!-- The digit is in the markup, not written by script, so a missed
+           first countdown event can never flash an empty overlay (FR-41).
+           countdown.ts swaps it on each tick. -->
+      <p id="digit" class="digit">3</p>
+    </main>
+  </body>
+</html>

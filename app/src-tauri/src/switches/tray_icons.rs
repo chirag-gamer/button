@@ -326,6 +326,63 @@ fn rollback_key(key_name: &str, prior: Option<u32>) {
     }
 }
 
+/// One row for the tray-icon Visible shelf (FR-30, list_tray_icons).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayIconInfo {
+    /// NotifyIconSettings registry key (the switch's write handle).
+    pub key: String,
+    /// Expanded absolute executable path.
+    pub exe: String,
+    /// IsPromoted == 1 (shown on the taskbar, not in overflow).
+    pub promoted: bool,
+}
+
+/// Every third-party tray icon with its current promoted state and exe
+/// path, button's own icon excluded. Entries without a readable
+/// ExecutablePath have no display name and are skipped.
+pub(crate) fn list_entries() -> Result<Vec<TrayIconInfo>, SwitchError> {
+    let own_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let root = CURRENT_USER.open(ROOT).map_err(|e| SwitchError::Os {
+        api: "RegOpenKeyEx",
+        code: e.code().0,
+    })?;
+    let mut out = Vec::new();
+    for key in root.keys().map_err(|e| SwitchError::Os {
+        api: "RegEnumKeyEx",
+        code: e.code().0,
+    })? {
+        let Some(opened) = root.open(&key).ok() else {
+            continue;
+        };
+        let is_promoted = opened.get_u32("IsPromoted").ok();
+        let expanded = opened
+            .get_string("ExecutablePath")
+            .ok()
+            .as_deref()
+            .and_then(expand_known_folder);
+        let Some(exe) = expanded else {
+            continue;
+        };
+        if exe_matches_own(Some(&exe), &own_exe) {
+            continue;
+        }
+        if out.iter().any(|t: &TrayIconInfo| same_exe(&t.exe, &exe)) {
+            continue;
+        }
+        out.push(TrayIconInfo {
+            key,
+            exe,
+            promoted: is_promoted == Some(1),
+        });
+    }
+    out.sort_by_key(|i: &TrayIconInfo| exe_name(&i.exe).to_lowercase());
+    Ok(out)
+}
+
 /// `"{GUID}\rest"` → known folder path + rest; plain paths unchanged
 /// (probe ground truth: NotifyIconSettings stores both forms).
 fn expand_known_folder(raw: &str) -> Option<String> {

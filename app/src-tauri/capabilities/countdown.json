@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "countdown",
+  "description": "Countdown overlays: event listening only, no commands (spec 9); one window per countdown generation",
+  "windows": ["countdown-*"],
+  "permissions": ["core:event:allow-listen"]
+}

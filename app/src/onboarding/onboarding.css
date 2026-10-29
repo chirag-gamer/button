@@ -1,0 +1,190 @@
+/* First-run onboarding wizard (FR-52, spec 7.14, D-047), imported by
+   onboarding/main.ts together with the shared theme. Steps are plain
+   sections toggled with `hidden`, so nothing here may defeat that
+   attribute. No inline styles, so the CSP needs no 'unsafe-inline'
+   (D-082). Nothing animates, so prefers-reduced-motion has nothing to
+   switch off (spec 10). */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  overflow: auto;
+}
+
+.wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+  padding: 18px 20px;
+}
+
+.step-indicator {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.warning {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* The step owns the space above the actions row, so Back/Next sit at the
+   bottom of the window whatever the step's length. */
+.step {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.step-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.step p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.step .hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+kbd {
+  padding: 2px 6px;
+  font-family: "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* One block of step text behind a shared lead line (step 3): the gap
+   matches the step's own, so the paragraphs read the same. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hotkey-value {
+  font-size: 14px;
+  padding: 6px 12px;
+}
+
+/* The tray overflow arrow, quoted from the Windows UI: a literal glyph
+   here is the clearest way to say "the ^ next to the clock". */
+.caret {
+  display: inline-block;
+  padding: 0 4px;
+  font-weight: 700;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+button.primary {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button.secondary {
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button.secondary:hover {
+  border-color: var(--accent);
+}
+
+/* A save in flight disables its own control, and settings that could not
+   be read leave both saves unusable (main.ts renderControls). */
+button.primary:disabled,
+button.secondary:disabled,
+.checkbox-row input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Keyboard focus must stay visible on every control (spec 10). */
+button.primary:focus-visible,
+button.secondary:focus-visible,
+.checkbox-row input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* High Contrast replaces the token palette, so name the system pairs. */
+@media (forced-colors: active) {
+  .hotkey-value,
+  kbd,
+  .caret,
+  .warning,
+  button.secondary {
+    border-color: CanvasText;
+  }
+  button.primary {
+    border: 1px solid ButtonText;
+  }
+}

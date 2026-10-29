@@ -29,6 +29,10 @@ pub enum SessionError {
     /// so the unrecovered file is never overwritten or deleted.
     #[error("the journal file could not be read; restart button to recover it")]
     JournalBlocked,
+    #[error("cannot begin countdown: session status is {0:?}")]
+    CannotBeginCountdown(SessionStatus),
+    #[error("cannot end countdown: session status is {0:?}")]
+    CannotEndCountdown(SessionStatus),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -167,6 +171,40 @@ impl SessionEngine {
 
     pub fn state(&self) -> &SessionState {
         &self.session
+    }
+
+    /// Countdown transitions (FR-41), driven only by automation: Idle →
+    /// Countdown on entry, Countdown → Idle on cancel, Countdown → Idle
+    /// right before the countdown thread's real start (which resets the
+    /// whole SessionState anyway).
+    pub fn begin_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Idle {
+            return Err(SessionError::CannotBeginCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Countdown;
+        Ok(())
+    }
+
+    pub fn cancel_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Countdown {
+            return Err(SessionError::CannotEndCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Idle;
+        Ok(())
+    }
+
+    pub fn finish_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Countdown {
+            return Err(SessionError::CannotEndCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Idle;
+        Ok(())
+    }
+
+    /// Set the time-limit deadline right after a start (FR-42). The
+    /// ticker fires the stop when the deadline is due.
+    pub fn set_time_limit(&mut self, ends_at: OffsetDateTime) {
+        self.session.ends_at = Some(ends_at);
     }
 
     fn switch(&self, id: SwitchId) -> Option<&dyn Switch> {

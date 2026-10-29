@@ -7,6 +7,10 @@
          request, which the asset resolver logs as an error. -->
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/overlays/backdrop.css" />
+    <script type="module" src="/src/overlays/backdrop.ts" defer></script>
   </head>
-  <body></body>
+  <body>
+    <img id="backdrop-image" class="backdrop-image" alt="" hidden />
+    <div id="backdrop-dim" class="backdrop-dim" hidden></div>
+  </body>
 </html>

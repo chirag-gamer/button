@@ -1,14 +1,18 @@
 mod automation;
+mod autostart;
 mod backdrop;
 pub mod com;
 pub mod commands;
+mod countdown;
 mod front;
 mod hotkeys;
 pub mod journal;
+mod onboarding;
 pub mod os;
 pub mod position;
 pub mod session;
 pub mod settings;
+mod settings_window;
 pub mod switches;
 mod tray;
 
@@ -169,6 +173,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(
             // ~5 rotated 1 MB files in the app log dir (spec 8).
@@ -200,6 +206,11 @@ pub fn run() {
                 | settings::SettingsRead::Newer(s) => s,
             };
             let backdrop_color = settings.backdrop.color.clone();
+            // The engine/hook paths read the monitor routing from the
+            // atomic mirror, never the state lock (D-066 pattern).
+            crate::backdrop::cache_monitors(settings.backdrop.monitors);
+            let start_with_windows = settings.general.start_with_windows;
+            let hotkeys_setting = settings.hotkeys.clone();
 
             let mut engine = session::SessionEngine::new(
                 switches::build_registry(&data_dir),
@@ -314,10 +325,25 @@ pub fn run() {
             .build()?;
             tray::attach_blur_close(&dropdown);
 
-            // Global hotkey (FR-9): failure leaves registered=false and the
-            // dropdown warns (spec 7.11).
-            let registered = hotkeys::register_toggle(app.handle(), &hotkey_binding);
-            hotkeys::set_registered(app.handle(), &hotkey_binding, registered);
+            // Global hotkeys (FR-9, FR-45): the recording-mode binding and
+            // every switch hotkey, registered at launch. Each binding registers
+            // independently so a switch conflict never disables Recording Mode.
+            if let Err(failures) =
+                hotkeys::register_at_launch(app.handle(), &hotkeys_setting)
+            {
+                for message in failures {
+                    log::warn!("{message}");
+                    automation::notify(app.handle(), &message);
+                }
+            }
+
+            // FR-47: refresh the autostart entry (exe path may have moved)
+            // or clear a stale one when the setting is off.
+            autostart::sync_at_launch(app.handle(), start_with_windows);
+
+            // FR-52: first-run onboarding, after recovery and hotkey
+            // registration (spec 7.14).
+            onboarding::maybe_open_at_launch(app.handle());
 
             // A CLI invocation runs its action and exits; `button.exe` with
             // no arguments behaves like the tray icon's left click later
@@ -344,23 +370,52 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_state,
             crate::commands::get_settings,
+            crate::commands::save_settings,
             crate::commands::start_recording,
             crate::commands::stop_recording,
             crate::commands::toggle_recording,
+            crate::commands::extend_recording,
             crate::commands::set_switch,
             crate::commands::unlock_keyboard,
             crate::commands::list_bt_devices,
             crate::commands::set_bluetooth_device,
             crate::commands::set_keep_awake_options,
+            crate::commands::list_apps,
+            crate::commands::list_tray_icons,
+            crate::commands::pick_backdrop_picture,
+            crate::commands::get_backdrop_style,
+            crate::commands::get_backdrop_image,
+            crate::commands::open_settings,
+            crate::commands::open_onboarding,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
-            // FR-8: an active session is restored before the process ends
-            // (Quit, sign-out, shutdown when Windows allows it).
-            if let tauri::RunEvent::Exit = event {
-                automation::restore_on_exit(_app);
-                front::unhook();
+            match event {
+                // FR-8: an active session is restored before the process
+                // ends (Quit, sign-out, shutdown when Windows allows it).
+                tauri::RunEvent::Exit => {
+                    automation::restore_on_exit(_app);
+                    front::unhook();
+                }
+                // A tray app outlives its windows: closing the settings or
+                // onboarding window must not end the process. An explicit
+                // Quit (app.exit) sets a code and still goes through.
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    if code.is_none() {
+                        api.prevent_exit();
+                    }
+                }
+                // FR-52: the onboarding window was closed (Done or the
+                // close box) — mark it done and save.
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } if label == "onboarding" => {
+                    onboarding::mark_done_on_destroy(_app);
+                }
+                _ => {}
             }
         });
 }
