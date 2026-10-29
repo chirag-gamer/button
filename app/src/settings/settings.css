@@ -406,6 +406,12 @@ button.icon:disabled {
     border-color: CanvasText;
   }
 
+  .swatch[aria-pressed="true"],
+  .gradient-tile[aria-pressed="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
   .row.capturing {
     outline-color: Highlight;
   }

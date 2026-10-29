@@ -274,8 +274,10 @@ pub fn save_settings(
     if autostart_changed
         && let Err(message) = crate::autostart::apply(&app, candidate.general.start_with_windows)
     {
-        if hotkeys_changed {
-            let _ = crate::hotkeys::apply_all(&app, &candidate.hotkeys, &previous.hotkeys);
+        if hotkeys_changed
+            && let Err(e) = crate::hotkeys::apply_all(&app, &candidate.hotkeys, &previous.hotkeys)
+        {
+            log::warn!("restoring hotkeys after a failed autostart apply failed: {e}");
         }
         return Err(IpcError::OsError(message));
     }
@@ -283,11 +285,16 @@ pub fn save_settings(
     match commit_settings(&app, &state, candidate.clone()) {
         Ok(saved) => Ok(saved),
         Err(error) => {
-            if hotkeys_changed {
-                let _ = crate::hotkeys::apply_all(&app, &candidate.hotkeys, &previous.hotkeys);
+            if hotkeys_changed
+                && let Err(e) =
+                    crate::hotkeys::apply_all(&app, &candidate.hotkeys, &previous.hotkeys)
+            {
+                log::warn!("restoring hotkeys after a failed save failed: {e}");
             }
-            if autostart_changed {
-                let _ = crate::autostart::apply(&app, previous.general.start_with_windows);
+            if autostart_changed
+                && let Err(e) = crate::autostart::apply(&app, previous.general.start_with_windows)
+            {
+                log::warn!("restoring Start with Windows after a failed save failed: {e}");
             }
             Err(error)
         }

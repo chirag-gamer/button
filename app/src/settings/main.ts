@@ -783,12 +783,12 @@ window.addEventListener(
   "keydown",
   (e) => {
     if (capturing === undefined) return;
-    e.preventDefault();
-    e.stopPropagation();
 
     // Escape is reserved for the Lock Keyboard unlock, so it cancels the
     // capture instead of saving a binding the core would reject.
     if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
       capturing = undefined;
       render();
       return;
@@ -796,6 +796,10 @@ window.addEventListener(
     // A bare key cannot be a global hotkey (it would also swallow Tab):
     // keep listening until a combo arrives.
     if (!(e.ctrlKey || e.altKey || e.metaKey)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
     const accelerator = eventToAccelerator(e);
     if (accelerator === null) return;
 
@@ -818,10 +822,7 @@ function renderBackdrop(): void {
   }
   colourBlock.hidden = backdrop.style !== "color";
   gradientBlock.hidden = backdrop.style !== "gradient";
-  // Both picture styles read backdrop.picture; the wallpaper one falls
-  // back to the OS wallpaper when the path is empty (D-087).
-  pictureBlock.hidden =
-    backdrop.style !== "picture" && backdrop.style !== "wallpaper";
+  pictureBlock.hidden = backdrop.style !== "picture";
 
   renderSwatches();
   renderGradients();
@@ -1027,27 +1028,38 @@ async function loadLists(): Promise<void> {
 async function init(): Promise<void> {
   // Listen before the first read so a change written elsewhere (dropdown,
   // tray, onboarding) is never missed (spec 5.1: the core is the writer).
-  void onSettingsChanged((next) => {
-    // A payload from another writer is newer than any save in flight.
-    payloadRevision += 1;
-    settings = next;
-    render();
-  });
-  void onStateChanged((next) => {
-    state = next;
-    const signature = availabilitySignature();
-    if (signature === lastAvailability) return;
-    lastAvailability = signature;
-    renderActions();
-  });
+  let initialReceivedSettings: Settings | undefined;
+  let initialReceivedState: AppState | undefined;
+
+  await Promise.all([
+    onSettingsChanged((next) => {
+      // A payload from another writer is newer than any save in flight.
+      payloadRevision += 1;
+      initialReceivedSettings = next;
+      settings = next;
+      render();
+    }),
+    onStateChanged((next) => {
+      initialReceivedState = next;
+      state = next;
+      const signature = availabilitySignature();
+      if (signature === lastAvailability) return;
+      lastAvailability = signature;
+      renderActions();
+    }),
+  ]);
 
   try {
     const [initialSettings, initialState] = await Promise.all([
       getSettings(),
       getState(),
     ]);
-    settings = initialSettings;
-    state = initialState;
+    if (initialReceivedSettings === undefined) {
+      settings = initialSettings;
+    }
+    if (initialReceivedState === undefined) {
+      state = initialState;
+    }
     render();
   } catch (e) {
     showError(message(e));

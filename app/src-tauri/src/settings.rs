@@ -185,6 +185,17 @@ pub enum BackdropMonitors {
     Front,
 }
 
+fn deserialize_optional_gradient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Backdrop {
@@ -192,6 +203,8 @@ pub struct Backdrop {
     /// "#rrggbb" (validated).
     pub color: String,
     /// A preset id from GRADIENT_PRESETS when style = gradient (D-087).
+    /// Accepts older schema-v1 raw JSON values during load to avoid quarantining.
+    #[serde(deserialize_with = "deserialize_optional_gradient", default)]
     pub gradient: Option<String>,
     pub picture: Option<String>,
     pub blur: u8,
@@ -861,8 +874,22 @@ mod tests {
     #[test]
     fn escape_is_reserved_for_unlocking_the_keyboard() {
         let mut settings = Settings::default();
-        settings.hotkeys.recording_mode = "Escape".into();
-        assert!(normalize_err(settings).contains("Escape"));
+        settings.hotkeys.recording_mode = "Ctrl+Escape".into();
+        assert!(normalize_err(settings).contains("Escape is reserved"));
+    }
+
+    #[test]
+    fn gradient_accepts_raw_json_value_from_older_schema_v1() {
+        let json =
+            r##"{"style": "color", "color": "#202020", "gradient": {"stops": ["#000", "#fff"]}}"##;
+        let backdrop: Backdrop = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(backdrop.gradient, None);
+
+        let json_preset =
+            r##"{"style": "gradient", "color": "#202020", "gradient": "gradient-ember"}"##;
+        let backdrop_preset: Backdrop =
+            serde_json::from_str(json_preset).expect("should deserialize");
+        assert_eq!(backdrop_preset.gradient, Some("gradient-ember".into()));
     }
 
     #[test]

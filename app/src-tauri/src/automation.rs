@@ -1,7 +1,7 @@
 //! The one dispatcher every trigger goes through: tray menu, tray clicks,
 //! hotkey, dropdown and the command line (spec 2.2, 6.3).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use tauri::{AppHandle, Emitter, Manager};
 use time::OffsetDateTime;
@@ -171,6 +171,10 @@ fn dispatch_err(e: crate::session::SessionError) -> DispatchError {
         crate::session::SessionError::AlreadyActive => DispatchError::SessionActive,
         crate::session::SessionError::NotActive => DispatchError::NoSession,
         crate::session::SessionError::Io(e) => DispatchError::Failed(e.to_string()),
+        crate::session::SessionError::CannotBeginCountdown(_)
+        | crate::session::SessionError::CannotEndCountdown(_) => {
+            DispatchError::Failed(e.to_string())
+        }
         crate::session::SessionError::JournalBlocked => {
             DispatchError::Failed(crate::session::SessionError::JournalBlocked.to_string())
         }
@@ -201,7 +205,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
         && matches!(action, Action::Start | Action::Toggle)
     {
         let generation = COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-        b.engine.set_status(SessionStatus::Countdown);
+        b.engine.begin_countdown().map_err(dispatch_err)?;
         drop(b);
         spawn_countdown(app.clone(), generation);
         after_change(app);
@@ -215,7 +219,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
             Action::Stop | Action::Toggle => {
                 let counted = COUNTDOWN_GENERATION.load(Ordering::Relaxed);
                 COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
-                b.engine.set_status(SessionStatus::Idle);
+                let _ = b.engine.cancel_countdown();
                 drop(b);
                 crate::countdown::close(app, counted);
                 after_change(app);
@@ -227,7 +231,7 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
             Action::Restore => {
                 let counted = COUNTDOWN_GENERATION.load(Ordering::Relaxed);
                 COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
-                b.engine.set_status(SessionStatus::Idle);
+                let _ = b.engine.cancel_countdown();
                 drop(b);
                 crate::countdown::close(app, counted);
                 after_change(app);
@@ -334,10 +338,19 @@ pub fn run(app: &AppHandle, action: Action) -> Result<(), DispatchError> {
 /// running countdown when any trigger bumps it.
 static COUNTDOWN_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The current countdown tick (3, 2, or 1), replayed to late-opening windows.
+static CURRENT_COUNTDOWN_TICK: AtomicU8 = AtomicU8::new(3);
+
 /// The current countdown generation, for the countdown window's
 /// self-check after its build finishes.
 pub(crate) fn countdown_generation() -> u64 {
     COUNTDOWN_GENERATION.load(Ordering::Relaxed)
+}
+
+/// The current countdown second (3, 2, or 1), so late-loading windows can show
+/// the current digit instead of waiting for the next tick (or staying on 3).
+pub(crate) fn current_countdown_tick() -> u8 {
+    CURRENT_COUNTDOWN_TICK.load(Ordering::Relaxed)
 }
 
 /// The countdown thread (FR-41): open the window, emit 3·2·1 one second
@@ -345,6 +358,7 @@ pub(crate) fn countdown_generation() -> u64 {
 /// the meantime (cancel). The state lock is never held while sleeping.
 fn spawn_countdown(app: AppHandle, generation: u64) {
     std::thread::spawn(move || {
+        CURRENT_COUNTDOWN_TICK.store(3, Ordering::Relaxed);
         crate::countdown::open(&app, generation);
         for seconds_left in [3u8, 2, 1] {
             if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
@@ -353,6 +367,7 @@ fn spawn_countdown(app: AppHandle, generation: u64) {
                 // will); never close another generation's window.
                 return;
             }
+            CURRENT_COUNTDOWN_TICK.store(seconds_left, Ordering::Relaxed);
             let _ = app.emit(
                 "countdown",
                 serde_json::json!({ "secondsLeft": seconds_left }),
@@ -362,19 +377,18 @@ fn spawn_countdown(app: AppHandle, generation: u64) {
         if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
             return;
         }
+        // Invalidate this generation so any late-building window self-closes
+        // instead of staying open as an orphan.
+        COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
         crate::countdown::close(&app, generation);
-        if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
-            return;
-        }
         // Back to Idle so the engine's start (which requires Idle) runs;
         // StartNow bypasses the countdown entry, so this cannot loop.
         {
             let state = app.state::<SharedState>();
             let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
-            if b.engine.state().status != SessionStatus::Countdown {
+            if b.engine.finish_countdown().is_err() {
                 return; // something else changed the state meanwhile
             }
-            b.engine.set_status(SessionStatus::Idle);
         }
         if let Err(message) = run(&app, Action::StartNow) {
             notify(&app, &message.to_string());

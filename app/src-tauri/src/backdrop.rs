@@ -197,7 +197,9 @@ pub fn show() -> Result<(), String> {
             let Some(window) = app2.get_webview_window(&w.label) else {
                 continue;
             };
-            let mut show_window = true;
+            let mut show_window = setting != crate::settings::BackdropMonitors::Front;
+            let window_monitor = monitor_rect_of(w.hwnd);
+            let effective_primary = primary_rect.or(window_monitor);
             if let Some(list) = monitors.as_ref() {
                 match monitor_for(list, w) {
                     // Fresh bounds for the monitor this window was
@@ -205,7 +207,7 @@ pub fn show() -> Result<(), String> {
                     Some(monitor) => {
                         let _ = window.set_position(*monitor.position());
                         let _ = window.set_size(*monitor.size());
-                        if let Some(primary) = primary_rect {
+                        if let Some(primary) = effective_primary {
                             show_window = shows_on_monitor(
                                 setting,
                                 front_rect,
@@ -221,9 +223,15 @@ pub fn show() -> Result<(), String> {
                         let _ = window.hide();
                         continue;
                     }
-                    // Unnamed monitor: show at the existing bounds.
-                    None => {}
+                    // Unnamed monitor: route with available HWND bounds.
+                    None => {
+                        if let (Some(primary), Some(m)) = (effective_primary, window_monitor) {
+                            show_window = shows_on_monitor(setting, front_rect, primary, m);
+                        }
+                    }
                 }
+            } else if let (Some(primary), Some(m)) = (effective_primary, window_monitor) {
+                show_window = shows_on_monitor(setting, front_rect, primary, m);
             }
             if show_window {
                 let _ = window.show();
@@ -361,19 +369,54 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
         );
         DEFAULT_COLOR
     });
-    let labels: Vec<String> = {
+    let snapshot: Vec<BackdropWindow> = {
         let windows = WINDOWS.lock().unwrap_or_else(|p| p.into_inner());
-        windows.iter().map(|w| w.label.clone()).collect()
+        windows.clone()
     };
-    if labels.is_empty() {
+    if snapshot.is_empty() {
         return;
     }
+    let is_shown = SHOWN.load(Ordering::Relaxed);
+    let setting = backdrop.monitors;
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
-        for label in labels {
-            if let Some(window) = app2.get_webview_window(&label) {
+        let primary_rect = app2
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| monitor_rect(&m));
+        let anchor = if is_shown {
+            crate::front::backdrop_anchor()
+        } else {
+            None
+        };
+        let front_rect = anchor.and_then(monitor_rect_of);
+        for w in snapshot {
+            if let Some(window) = app2.get_webview_window(&w.label) {
                 let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, 255)));
                 let _ = window.reload();
+                if is_shown {
+                    let window_monitor = monitor_rect_of(w.hwnd);
+                    let effective_primary = primary_rect.or(window_monitor);
+                    let show_window = match setting {
+                        crate::settings::BackdropMonitors::All => true,
+                        crate::settings::BackdropMonitors::Front => {
+                            if let (Some(primary), Some(m)) = (effective_primary, window_monitor) {
+                                shows_on_monitor(setting, front_rect, primary, m)
+                            } else {
+                                false
+                            }
+                        }
+                    };
+                    if show_window {
+                        let _ = window.show();
+                        if let Some(a) = anchor {
+                            let _ = place_below(w.hwnd, a);
+                        }
+                    } else {
+                        let _ = window.hide();
+                    }
+                }
             }
         }
     });

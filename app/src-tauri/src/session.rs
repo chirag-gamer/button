@@ -29,6 +29,10 @@ pub enum SessionError {
     /// so the unrecovered file is never overwritten or deleted.
     #[error("the journal file could not be read; restart button to recover it")]
     JournalBlocked,
+    #[error("cannot begin countdown: session status is {0:?}")]
+    CannotBeginCountdown(SessionStatus),
+    #[error("cannot end countdown: session status is {0:?}")]
+    CannotEndCountdown(SessionStatus),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -173,8 +177,28 @@ impl SessionEngine {
     /// Countdown on entry, Countdown → Idle on cancel, Countdown → Idle
     /// right before the countdown thread's real start (which resets the
     /// whole SessionState anyway).
-    pub fn set_status(&mut self, status: SessionStatus) {
-        self.session.status = status;
+    pub fn begin_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Idle {
+            return Err(SessionError::CannotBeginCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Countdown;
+        Ok(())
+    }
+
+    pub fn cancel_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Countdown {
+            return Err(SessionError::CannotEndCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Idle;
+        Ok(())
+    }
+
+    pub fn finish_countdown(&mut self) -> Result<(), SessionError> {
+        if self.session.status != SessionStatus::Countdown {
+            return Err(SessionError::CannotEndCountdown(self.session.status));
+        }
+        self.session.status = SessionStatus::Idle;
+        Ok(())
     }
 
     /// Set the time-limit deadline right after a start (FR-42). The

@@ -326,12 +326,14 @@ pub fn run() {
             tray::attach_blur_close(&dropdown);
 
             // Global hotkeys (FR-9, FR-45): the recording-mode binding and
-            // every switch hotkey, registered at launch. Failure leaves
-            // registered=false and the dropdown warns (spec 7.11).
-            if let Err(message) =
-                hotkeys::register_all(app.handle(), &hotkeys_setting)
+            // every switch hotkey, registered at launch. Each binding registers
+            // independently so a switch conflict never disables Recording Mode.
+            if let Err(failures) =
+                hotkeys::register_at_launch(app.handle(), &hotkeys_setting)
             {
-                log::warn!("{message}");
+                for message in failures {
+                    log::warn!("{message}");
+                }
             }
 
             // FR-47: refresh the autostart entry (exe path may have moved)

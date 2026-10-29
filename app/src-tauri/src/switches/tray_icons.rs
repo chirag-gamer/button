@@ -370,12 +370,16 @@ pub(crate) fn list_entries() -> Result<Vec<TrayIconInfo>, SwitchError> {
         if exe_matches_own(Some(&exe), &own_exe) {
             continue;
         }
+        if out.iter().any(|t: &TrayIconInfo| same_exe(&t.exe, &exe)) {
+            continue;
+        }
         out.push(TrayIconInfo {
             key,
             exe,
             promoted: is_promoted == Some(1),
         });
     }
+    out.sort_by_key(|i: &TrayIconInfo| exe_name(&i.exe).to_lowercase());
     Ok(out)
 }
 

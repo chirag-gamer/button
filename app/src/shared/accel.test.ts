@@ -33,9 +33,17 @@ describe("eventToAccelerator", () => {
 
   it("maps Space and arrows to parser names", () => {
     expect(eventToAccelerator(ev({ code: "Space", key: " " }))).toBe("Space");
-    expect(eventToAccelerator(ev({ code: "ArrowLeft", key: "Left" }))).toBe(
-      "Left",
+    expect(eventToAccelerator(ev({ code: "ArrowLeft", key: "ArrowLeft" }))).toBe(
+      "ArrowLeft",
     );
+    expect(eventToAccelerator(ev({ code: "ArrowUp", key: "ArrowUp" }))).toBe(
+      "ArrowUp",
+    );
+  });
+
+  it("returns null for IME and dead keys", () => {
+    expect(eventToAccelerator(ev({ code: "KeyA", key: "Process" }))).toBe(null);
+    expect(eventToAccelerator(ev({ code: "KeyE", key: "Dead" }))).toBe(null);
   });
 
   it("maps function keys", () => {

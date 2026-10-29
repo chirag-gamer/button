@@ -3,7 +3,7 @@
 //! closed when it finishes or the countdown is cancelled. The HTML starts
 //! at "3" so a missed first event cannot flash an empty overlay.
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// The window label for a countdown generation. One label per countdown:
 /// a stale thread can then only close its own window, never a successor's
@@ -36,6 +36,14 @@ pub fn open(app: &AppHandle, generation: u64) {
         .resizable(false)
         .shadow(false)
         .content_protected(true)
+        .on_page_load(move |window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && crate::automation::countdown_generation() == generation
+            {
+                let tick = crate::automation::current_countdown_tick();
+                let _ = window.emit("countdown", serde_json::json!({ "secondsLeft": tick }));
+            }
+        })
         .build()
         {
             Ok(window) => window,
@@ -51,9 +59,14 @@ pub fn open(app: &AppHandle, generation: u64) {
         // Positioning runs on the main thread: primary_monitor is a
         // blocking getter off it (the same rule backdrop::show follows).
         let app3 = app2.clone();
+        let win = window.clone();
         let _ = app2.run_on_main_thread(move || {
-            if let Some((x, y)) = centred_position(&app3) {
-                let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+            if crate::automation::countdown_generation() != generation {
+                let _ = win.close();
+                return;
+            }
+            if let Some((x, y)) = centred_position(&app3, &win) {
+                let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
             }
         });
     });
@@ -68,20 +81,31 @@ pub fn close(app: &AppHandle, generation: u64) {
     }
 }
 
-/// Window top-left so the 240×240 overlay sits centred on the monitor
-/// the front app is on, else the primary monitor. Runs on the main
+/// Window top-left so the overlay sits centred on the monitor the front app
+/// is on, else the primary monitor. Uses real physical outer size from the
+/// window handle to account for display scaling (FR-41). Runs on the main
 /// thread only (primary_monitor is a blocking getter elsewhere).
 #[cfg(not(test))]
-fn centred_position(app: &AppHandle) -> Option<(i32, i32)> {
-    const SIZE: i32 = 240;
+fn centred_position(app: &AppHandle, window: &tauri::WebviewWindow) -> Option<(i32, i32)> {
+    let size = window.outer_size().unwrap_or_default();
+    let width = if size.width > 0 {
+        size.width as i32
+    } else {
+        240
+    };
+    let height = if size.height > 0 {
+        size.height as i32
+    } else {
+        240
+    };
     let monitor_rect = front_monitor_rect(app).or_else(|| primary_rect(app))?;
     let centre_x = monitor_rect.0 + monitor_rect.2 as i32 / 2;
     let centre_y = monitor_rect.1 + monitor_rect.3 as i32 / 2;
-    Some((centre_x - SIZE / 2, centre_y - SIZE / 2))
+    Some((centre_x - width / 2, centre_y - height / 2))
 }
 
 #[cfg(test)]
-fn centred_position(_app: &AppHandle) -> Option<(i32, i32)> {
+fn centred_position(_app: &AppHandle, _window: &tauri::WebviewWindow) -> Option<(i32, i32)> {
     None
 }
 

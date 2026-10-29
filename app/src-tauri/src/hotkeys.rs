@@ -6,57 +6,134 @@
 //! set, and on any failure restores the previous set.
 
 use tauri::{AppHandle, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::SharedState;
 use crate::automation::{self, Action, SwitchOnOff};
 use crate::settings::Hotkeys;
 
+/// Parse a hotkey string and validate that it has at least one modifier
+/// (Ctrl, Alt, Win) and is not the reserved Escape key.
+pub fn parse_valid_hotkey(binding: &str) -> Result<Shortcut, String> {
+    let shortcut = binding
+        .parse::<Shortcut>()
+        .map_err(|e| format!("invalid hotkey '{binding}': {e}"))?;
+    let mods = shortcut.mods;
+    if !mods.ctrl() && !mods.alt() && !mods.meta() {
+        return Err(format!(
+            "hotkey '{binding}' must include at least one of Ctrl, Alt, or Win"
+        ));
+    }
+    if shortcut.key == Code::Escape {
+        return Err("Escape is reserved: it unlocks the keyboard".into());
+    }
+    Ok(shortcut)
+}
+
 /// Register the whole hotkey set, replacing whatever is registered now.
 /// Transactional: on any failure the previous set is re-registered and the
 /// error names the binding that failed (FR-45 "rejected with a message").
 pub fn apply_all(app: &AppHandle, previous: &Hotkeys, next: &Hotkeys) -> Result<(), String> {
-    let parse = |binding: &str| -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
-        binding
-            .parse::<tauri_plugin_global_shortcut::Shortcut>()
-            .map_err(|_| format!("'{binding}' is not a valid hotkey"))
-    };
-
     let old = hotkey_list(previous);
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| format!("unregistering the old hotkeys failed: {e}"))?;
-    register_set(app, next, parse, Some(&old))
+    register_set(app, next, &old)
 }
 
-/// Launch registration (spec 7.11): there is no previous set to restore,
-/// so a failure leaves everything unregistered and the FR-9 warning shows.
-/// Rebinding at runtime uses `apply_all`, which rolls back.
-pub fn register_all(app: &AppHandle, next: &Hotkeys) -> Result<(), String> {
-    let parse = |binding: &str| -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
-        binding
-            .parse::<tauri_plugin_global_shortcut::Shortcut>()
-            .map_err(|_| format!("'{binding}' is not a valid hotkey"))
-    };
-    app.global_shortcut()
-        .unregister_all()
-        .map_err(|e| format!("unregistering the old hotkeys failed: {e}"))?;
-    register_set(app, next, parse, None)
+/// Launch registration (spec 7.11): registers each binding independently
+/// so that a conflict on one switch does not unregister or disable Recording
+/// Mode or other working hotkeys.
+pub fn register_at_launch(app: &AppHandle, next: &Hotkeys) -> Result<(), Vec<String>> {
+    let _ = app.global_shortcut().unregister_all();
+    let mut failures = Vec::new();
+
+    let rm_binding = &next.recording_mode;
+    if !rm_binding.is_empty() {
+        match parse_valid_hotkey(rm_binding) {
+            Ok(shortcut) => {
+                let result = app
+                    .global_shortcut()
+                    .on_shortcut(shortcut, move |app, _s, event| {
+                        if event.state == ShortcutState::Pressed
+                            && let Err(message) = automation::run(app, Action::Toggle)
+                        {
+                            automation::notify(app, &message.to_string());
+                        }
+                    });
+                match result {
+                    Ok(_) => {
+                        set_registered(app, rm_binding, true);
+                    }
+                    Err(e) => {
+                        set_registered(app, rm_binding, false);
+                        failures.push(format!(
+                            "recording mode hotkey '{rm_binding}' is not available: {e}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                set_registered(app, rm_binding, false);
+                failures.push(e);
+            }
+        }
+    } else {
+        set_registered(app, "", false);
+    }
+
+    for (id_str, binding) in &next.switches {
+        if binding.is_empty() {
+            continue;
+        }
+        let Ok(id) = automation::parse_switch_id(id_str) else {
+            continue;
+        };
+        let shortcut = match parse_valid_hotkey(binding) {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+        let action = Action::Switch {
+            id,
+            on: SwitchOnOff::Toggle,
+        };
+        let result = app
+            .global_shortcut()
+            .on_shortcut(shortcut, move |app, _s, event| {
+                if event.state == ShortcutState::Pressed
+                    && let Err(message) = automation::run(app, action.clone())
+                {
+                    automation::notify(app, &message.to_string());
+                }
+            });
+        if let Err(e) = result {
+            failures.push(format!(
+                "switch hotkey '{binding}' ({id_str}) is not available: {e}"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
 }
 
-/// The shared registration loop. `previous` is the set to roll back to on
-/// failure; `None` at launch (nothing to restore, unregister everything).
+/// Register the whole hotkey set; on failure rolls back to `previous`.
 fn register_set(
     app: &AppHandle,
     next: &Hotkeys,
-    parse: impl Fn(&str) -> Result<tauri_plugin_global_shortcut::Shortcut, String>,
-    previous: Option<&[(String, Action)]>,
+    previous: &[(String, Action)],
 ) -> Result<(), String> {
     let mut registered: Vec<(String, tauri_plugin_global_shortcut::Shortcut)> = Vec::new();
     for (binding, action) in hotkey_list(next) {
-        let shortcut = match parse(&binding) {
+        let shortcut = match parse_valid_hotkey(&binding) {
             Ok(shortcut) => shortcut,
-            Err(message) => return fail(app, previous, &message),
+            Err(message) => return rollback(app, previous, &message),
         };
         let result = app
             .global_shortcut()
@@ -69,34 +146,18 @@ fn register_set(
             });
         if let Err(e) = result {
             let message = format!("'{binding}' is not available: {e}");
-            return fail(app, previous, &message);
+            return rollback(app, previous, &message);
         }
         registered.push((binding, shortcut));
     }
 
     // Record the recording-mode registration state for the UI (FR-9).
     let rm_binding = next.recording_mode.clone();
-    let registered_ok = parse(&rm_binding)
+    let registered_ok = parse_valid_hotkey(&rm_binding)
         .map(|shortcut| registered.iter().any(|(_, s)| *s == shortcut))
         .unwrap_or(false);
     set_registered(app, &rm_binding, registered_ok);
     Ok(())
-}
-
-/// Fail a registration run: roll back to the previous set when there is
-/// one, otherwise leave nothing registered (launch).
-fn fail(
-    app: &AppHandle,
-    previous: Option<&[(String, Action)]>,
-    message: &str,
-) -> Result<(), String> {
-    match previous {
-        Some(old) => rollback(app, old, message),
-        None => {
-            let _ = app.global_shortcut().unregister_all();
-            Err(message.to_string())
-        }
-    }
 }
 
 /// The (binding, dispatcher action) pairs of a hotkey set, skipping empty
@@ -128,10 +189,16 @@ fn hotkey_list(hotkeys: &Hotkeys) -> Vec<(String, Action)> {
 /// Put the previous set back and report why the new one failed.
 fn rollback(app: &AppHandle, previous: &[(String, Action)], message: &str) -> Result<(), String> {
     let _ = app.global_shortcut().unregister_all();
+    let mut rm_restored = false;
+    let mut rm_binding = String::new();
     for (binding, action) in previous {
         let action = action.clone();
-        if let Ok(shortcut) = binding.parse::<tauri_plugin_global_shortcut::Shortcut>()
-            && let Err(e) = app
+        let is_rm = matches!(action, Action::Toggle);
+        if is_rm {
+            rm_binding = binding.clone();
+        }
+        if let Ok(shortcut) = parse_valid_hotkey(binding) {
+            match app
                 .global_shortcut()
                 .on_shortcut(shortcut, move |app, _s, event| {
                     if event.state == ShortcutState::Pressed
@@ -139,10 +206,20 @@ fn rollback(app: &AppHandle, previous: &[(String, Action)], message: &str) -> Re
                     {
                         automation::notify(app, &message.to_string());
                     }
-                })
-        {
-            log::warn!("hotkey '{binding}' could not be restored after a failed save: {e}");
+                }) {
+                Ok(_) => {
+                    if is_rm {
+                        rm_restored = true;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("hotkey '{binding}' could not be restored after a failed save: {e}");
+                }
+            }
         }
+    }
+    if !rm_binding.is_empty() {
+        set_registered(app, &rm_binding, rm_restored);
     }
     Err(message.to_string())
 }
@@ -161,6 +238,14 @@ mod tests {
     use super::*;
     use crate::automation::SwitchOnOff;
     use crate::switches::SwitchId;
+
+    #[test]
+    fn parse_valid_hotkey_rejects_shift_only_and_escape() {
+        assert!(parse_valid_hotkey("Shift+K").is_err());
+        assert!(parse_valid_hotkey("Ctrl+Escape").is_err());
+        assert!(parse_valid_hotkey("Alt+R").is_ok());
+        assert!(parse_valid_hotkey("Ctrl+Alt+F10").is_ok());
+    }
 
     #[test]
     fn hotkey_list_maps_the_recording_toggle_and_switch_toggles() {

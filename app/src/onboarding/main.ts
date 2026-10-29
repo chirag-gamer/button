@@ -49,6 +49,7 @@ let capturing = false;
  * second save cannot be built from the copy from before the first. */
 let savingHotkeys = false;
 let savingGeneral = false;
+let pendingSettings: Settings | null = null;
 
 /** Disabling a focused control drops focus to the body; put it back so a
  * keyboard user is not thrown out of the step by a slow save. */
@@ -82,14 +83,15 @@ function renderHotkey(): void {
  * save runs the checkbox keeps the state the user just chose. */
 function renderControls(): void {
   const loaded = settings !== undefined;
+  const saving = savingGeneral || savingHotkeys;
   if (!savingGeneral) {
     startWithWindows.checked = settings?.general.startWithWindows ?? false;
   }
-  startWithWindows.disabled = !loaded || savingGeneral;
-  hotkeyChange.disabled = !loaded || savingHotkeys;
+  startWithWindows.disabled = !loaded || saving;
+  hotkeyChange.disabled = !loaded || saving;
   // Next doubles as Done, which closes the window and drops a save still
   // in flight; hold it until the save has landed either way.
-  nextButton.disabled = savingGeneral || savingHotkeys;
+  nextButton.disabled = saving;
 }
 
 /** Show one step, relabel the primary button, and move focus to the new
@@ -122,12 +124,12 @@ function stopCapture(): void {
  * and a shortcut never triggers anything. A modifier-only press or a key
  * the global-hotkey parser cannot take keeps the capture running. */
 function onCaptureKey(event: KeyboardEvent): void {
-  event.preventDefault();
-  event.stopPropagation();
   if (event.repeat) return;
   // Escape cancels instead of saving: it is reserved for unlocking the
   // keyboard, so the core would reject it anyway.
   if (event.key === "Escape" || event.code === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
     stopCapture();
     hotkeyChange.focus();
     return;
@@ -136,6 +138,8 @@ function onCaptureKey(event: KeyboardEvent): void {
   // typing), so keep listening until a combo arrives, like the Settings
   // window's editor (spec 7.11).
   if (!(event.ctrlKey || event.altKey || event.metaKey)) return;
+  event.preventDefault();
+  event.stopPropagation();
   const binding = eventToAccelerator(event);
   if (binding === null) return;
   stopCapture();
@@ -143,7 +147,7 @@ function onCaptureKey(event: KeyboardEvent): void {
 }
 
 function startCapture(): void {
-  if (settings === undefined || savingHotkeys) return;
+  if (settings === undefined || savingHotkeys || savingGeneral) return;
   if (capturing) {
     stopCapture();
     return;
@@ -177,6 +181,10 @@ async function saveRecordingMode(binding: string): Promise<void> {
     showError(e instanceof Error ? e.message : String(e));
   } finally {
     savingHotkeys = false;
+    if (!savingHotkeys && !savingGeneral && pendingSettings !== null) {
+      settings = pendingSettings;
+      pendingSettings = null;
+    }
     renderHotkey();
     renderControls();
     restoreFocus(hotkeyChange, hadFocus);
@@ -202,6 +210,10 @@ async function saveStartWithWindows(): Promise<void> {
     showError(e instanceof Error ? e.message : String(e));
   } finally {
     savingGeneral = false;
+    if (!savingHotkeys && !savingGeneral && pendingSettings !== null) {
+      settings = pendingSettings;
+      pendingSettings = null;
+    }
     renderControls();
     restoreFocus(startWithWindows, hadFocus);
   }
@@ -248,7 +260,9 @@ startWithWindows.addEventListener("change", () => {
 // page's own saves is in flight, its returned copy is the authoritative
 // update instead.
 void onSettingsChanged((next) => {
-  if (!savingHotkeys && !savingGeneral) {
+  if (savingHotkeys || savingGeneral) {
+    pendingSettings = next;
+  } else {
     settings = next;
     renderHotkey();
     renderControls();

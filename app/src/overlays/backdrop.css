@@ -54,8 +54,3 @@ body {
   background: linear-gradient(135deg, #17181c 0%, #3a3d45 55%, #6f7480 100%);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .backdrop-image {
-    transform: none;
-  }
-}

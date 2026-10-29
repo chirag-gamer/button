@@ -10,10 +10,10 @@ const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift", "Super"] as const;
 /** Map an event.code that should be captured by its named key. */
 const CODE_BY_CODE: Record<string, string> = {
   Space: "Space",
-  ArrowUp: "Up",
-  ArrowDown: "Down",
-  ArrowLeft: "Left",
-  ArrowRight: "Right",
+  ArrowUp: "ArrowUp",
+  ArrowDown: "ArrowDown",
+  ArrowLeft: "ArrowLeft",
+  ArrowRight: "ArrowRight",
   Escape: "Escape",
   Enter: "Enter",
   Tab: "Tab",
@@ -27,6 +27,7 @@ export function eventKeyToken(event: {
   code: string;
   key: string;
 }): string | null {
+  if (event.key === "Process" || event.key === "Dead") return null;
   const named = CODE_BY_CODE[event.code];
   if (named !== undefined) {
     return named;
