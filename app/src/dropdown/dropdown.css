@@ -181,7 +181,7 @@ button:focus-visible {
   font-size: 13px;
   font-weight: 600;
   color: #fff;
-  background: var(--record);
+  background: var(--record-strong);
   border: none;
   border-radius: 999px;
   cursor: pointer;
@@ -191,7 +191,7 @@ button:focus-visible {
 }
 
 .pill:hover {
-  background: #ff6f73;
+  background: var(--record-strong-hover);
 }
 
 .pill:active {

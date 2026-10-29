@@ -202,6 +202,21 @@ export const openSettings = (section?: SettingsSection) =>
 export const fitDropdown = (height: number) =>
   call<void>("fit_dropdown", { height });
 export const openOnboarding = () => call<void>("open_onboarding");
+
+/** `check_update`'s result (spec 6.1). */
+export interface UpdateCheck {
+  available: boolean;
+  version?: string;
+}
+
+/** Ask GitHub for a newer release (FR-22); a found one also lands in
+ * AppState.update. */
+export const checkUpdate = () => call<UpdateCheck>("check_update");
+/** Install the found update; SESSION_ACTIVE while anything is applied.
+ * On success the app exits and the installer starts the new version. */
+export const installUpdate = () => call<void>("install_update");
+/** Copy the diagnostic report to the clipboard (FR-24). */
+export const copyDiagnostics = () => call<void>("copy_diagnostics");
 export const pickBackdropPicture = () =>
   call<string | null>("pick_backdrop_picture");
 

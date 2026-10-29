@@ -4,8 +4,6 @@
 
 A free, open-source Windows app that gets your screen ready to record in one click, and puts everything back when you're done.
 
-> **Status:** in development. There's no release yet, so the download link below starts working once v1.0.0 is out.
-
 ## What it does
 
 Before you record a tutorial or share your screen in a call, you usually tidy up first. You hide the desktop icons, minimize the other windows, silence notifications and make sure the PC won't fall asleep. Afterwards you have to undo all of it, and it's easy to forget something.
@@ -21,7 +19,7 @@ button does this for you. Click its icon in the system tray, or press **Alt+R**,
 - Hide other apps (minimizes everything except the app you're showing)
 - Hide the taskbar (turns on auto-hide)
 - Hide tray icons (Windows 11 only)
-- Backdrop: a colour, gradient or picture behind your app, on all monitors or just one
+- Backdrop behind your app: your wallpaper (blurred), a built-in picture, a colour, a gradient or your own picture, on all monitors or just one
 - Keep the PC awake
 - Mute Windows alert sounds
 
@@ -41,8 +39,9 @@ button does this for you. Click its icon in the system tray, or press **Alt+R**,
 - Turn any switch off automatically in 15 minutes, 1 hour, 4 hours or tomorrow morning.
 - Optional 3, 2, 1 countdown and an optional time limit.
 - A short welcome screen the first time you start it.
+- Updates: when a new version is out, button tells you and installs it with one click from the tray menu or Settings. It never updates in the middle of Recording Mode.
 - Command line for scripts, shortcuts, Task Scheduler or a Stream Deck: `button.exe toggle`, `button.exe switch microphone on`.
-- No account, no ads, no tracking. The only thing button connects to is GitHub, to check for updates, and you can turn that off.
+- No account, no ads, no tracking. The only thing button connects to is GitHub, to check for updates, and you can turn that off. (WebView2, the part of Windows that draws button's windows, may still talk to Microsoft the same way Edge does.)
 
 "Experimental" means the feature relies on parts of Windows that Microsoft doesn't document. button checks at startup whether they work on your PC and turns the feature off if they don't.
 
@@ -58,6 +57,10 @@ button isn't code-signed. Signing certificates cost money and this is a free pro
 
 Every installer is built by GitHub Actions straight from the code in this repo, so you can see exactly what goes into it. If you'd rather not run it, you can build button yourself.
 
+### Uninstall
+
+Open **Settings > Apps > Installed apps** (on Windows 10: **Settings > Apps > Apps & features**), find button and choose **Uninstall**. If Recording Mode is on, button puts everything back first.
+
 ### Windows 10
 
 I don't have Windows 10, so it remains untested. However, it should work. If something doesn't, please open an issue. A few features need Windows 11 and are greyed out on Windows 10.
@@ -65,6 +68,10 @@ I don't have Windows 10, so it remains untested. However, it should work. If som
 ## How it puts things back
 
 Before button changes a setting, it writes down the old value in a small file on your PC. Restoring reads that file backwards and puts each setting back. If you changed something back yourself during the session, button leaves it alone. If you uninstall button while Recording Mode is on, it restores everything first.
+
+## Found a bug?
+
+Right-click the tray icon, choose **Copy diagnostic report**, and paste it into a [new issue](https://github.com/chirag-gamer/button/issues/new). The report has the app version, your Windows build, which switches work on your PC and the last 200 log lines. It has no window titles and no file paths.
 
 ## Build it yourself
 

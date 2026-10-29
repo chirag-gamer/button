@@ -1,0 +1,72 @@
+# Release (spec 12, D-044): pushing a v* tag builds the per-user NSIS
+# installer and creates a DRAFT GitHub release with the installer, its
+# updater signature, latest.json and a button-setup.exe copy for the
+# README's fixed download link. The owner reviews the draft and publishes.
+#
+# Secrets: TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# (the minisign key that signs updates, spec 9). No code signing (D-043).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The updater compares versions, so the tag must match the app.
+      # The tag goes through env, never into the script text.
+      - name: Check the tag matches the app version
+        shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $version = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne $env:TAG_NAME) {
+            throw "Tag $env:TAG_NAME does not match the app version $version"
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+
+      # release.conf.json turns on createUpdaterArtifacts for this build
+      # only, so local builds need no signing key (spec 12).
+      - name: Build the installer and create the draft release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: button ${{ github.ref_name }}
+          releaseBody: Download button-setup.exe below and run it. The installer doesn't need admin rights.
+          releaseDraft: true
+          args: --config src-tauri/release.conf.json
+
+      # The README links to releases/latest/download/button-setup.exe,
+      # which needs the same asset name in every release.
+      - name: Upload button-setup.exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $installer = Get-ChildItem app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if (@($installer).Count -ne 1) { throw "Expected one NSIS installer, found $(@($installer).Count)" }
+          Copy-Item $installer.FullName button-setup.exe
+          gh release upload $env:TAG_NAME button-setup.exe --clobber

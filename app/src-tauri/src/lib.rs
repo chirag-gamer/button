@@ -4,6 +4,7 @@ mod backdrop;
 pub mod com;
 pub mod commands;
 mod countdown;
+pub mod diagnostics;
 mod front;
 mod hotkeys;
 pub mod journal;
@@ -15,6 +16,7 @@ pub mod settings;
 mod settings_window;
 pub mod switches;
 mod tray;
+mod updater;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -125,6 +127,8 @@ pub struct ButtonState {
     pub settings_read_only: bool,
     pub hotkey: HotkeyState,
     pub os: OsInfo,
+    /// The update the last check found (FR-22); AppState shows its version.
+    pub update: Option<tauri_plugin_updater::Update>,
 }
 
 pub type SharedState = std::sync::Mutex<ButtonState>;
@@ -135,7 +139,9 @@ pub fn build_app_state(b: &ButtonState) -> AppState {
         switches: b.engine.switch_states(),
         hotkey: b.hotkey.clone(),
         os: b.os,
-        update: None,
+        update: b.update.as_ref().map(|u| UpdateState {
+            version: u.version.clone(),
+        }),
     }
 }
 
@@ -176,6 +182,8 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Rust-side only (updater.rs): no JS permissions (spec 9).
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             // ~5 rotated 1 MB files in the app log dir (spec 8).
             tauri_plugin_log::Builder::new()
@@ -210,6 +218,7 @@ pub fn run() {
             // atomic mirror, never the state lock (D-066 pattern).
             crate::backdrop::cache_monitors(settings.backdrop.monitors);
             let start_with_windows = settings.general.start_with_windows;
+            let check_for_updates = settings.general.check_for_updates;
             let hotkeys_setting = settings.hotkeys.clone();
 
             let mut engine = session::SessionEngine::new(
@@ -237,6 +246,25 @@ pub fn run() {
             // app handle (same Shell-module pattern as the backdrop).
             switches::lock_keyboard::set_app(app.handle().clone());
             switches::bluetooth::set_app(app.handle().clone());
+
+            // `button.exe restore` with no instance running, which is how
+            // the uninstaller calls it (FR-49, D-099): recovery above put
+            // back what a dead process left, so restore the rest (switch
+            // timers) and exit. The uninstaller waits for this process,
+            // and nothing is left that needs the tray app.
+            let cli_args: Vec<String> = std::env::args().skip(1).collect();
+            let cli_action = automation::parse(&cli_args);
+            if matches!(cli_action, Ok(automation::Action::Restore)) {
+                match engine.restore_all_now(now) {
+                    Ok(0) => log::info!("restore-only launch: everything restored"),
+                    Ok(failed) => log::error!(
+                        "restore-only launch: {failed} switch(es) could not be restored"
+                    ),
+                    Err(e) => log::error!("restore-only launch failed: {e}"),
+                }
+                log::logger().flush();
+                std::process::exit(0);
+            }
             let hotkey_binding = settings.hotkeys.recording_mode.clone();
 
             app.manage(std::sync::Mutex::new(crate::ButtonState {
@@ -248,6 +276,7 @@ pub fn run() {
                     registered: false,
                 },
                 os,
+                update: None,
             }));
             // FR-6: notify what launch recovery restored, including what
             // failed to restore (spec 7.3.2 also requires notifying about
@@ -345,13 +374,13 @@ pub fn run() {
             // registration (spec 7.14).
             onboarding::maybe_open_at_launch(app.handle());
 
-            // A CLI invocation runs its action and exits; `button.exe` with
-            // no arguments behaves like the tray icon's left click later
-            // (task 2.6). Task 2.8 adds forwarding to the running instance.
-            // Exit code is always 0 (spec 6.3, KNOW verified in 2.8).
-            let cli_args: Vec<String> = std::env::args().skip(1).collect();
-            match automation::parse(&cli_args) {
-                Ok(action) if !matches!(action, automation::Action::ShowDropdown { .. }) => {
+            // A CLI invocation runs its action; `button.exe` with no
+            // arguments behaves like the tray icon's left click later
+            // (task 2.6). Exit code is always 0 (spec 6.3, KNOW verified
+            // in 2.8). `restore` already exited above.
+            match cli_action {
+                Ok(automation::Action::ShowDropdown { .. }) => {}
+                Ok(action) => {
                     // Spec 6.3: with no instance running, this process
                     // becomes the instance and runs the command. It stays
                     // resident so the session (or dropdown) survives.
@@ -362,8 +391,14 @@ pub fn run() {
                 Err(error) => {
                     automation::notify(app.handle(), &error);
                     app.handle().exit(0);
+                    return Ok(());
                 }
-                _ => {}
+            }
+
+            // FR-22: one update check per launch unless it is turned off.
+            // This is button's only network call (FR-25).
+            if check_for_updates {
+                updater::check_at_launch(app.handle());
             }
             Ok(())
         })
@@ -388,6 +423,9 @@ pub fn run() {
             crate::commands::open_settings,
             crate::commands::fit_dropdown,
             crate::commands::open_onboarding,
+            crate::commands::check_update,
+            crate::commands::install_update,
+            crate::commands::copy_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

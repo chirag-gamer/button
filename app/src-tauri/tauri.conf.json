@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "button",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "io.github.chirag-gamer.button",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -18,13 +18,40 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "chirag-gamer",
+    "copyright": "Copyright (c) 2026 chirag-gamer. MIT License.",
+    "homepage": "https://github.com/chirag-gamer/button",
+    "license": "MIT",
+    "category": "Utility",
+    "shortDescription": "Get your screen ready to record in one click",
+    "longDescription": "button is a free, open-source tray app for Windows. One click or Alt+R turns on Recording Mode: it hides desktop icons and other apps, silences notifications, keeps the PC awake and more. Click again and it puts back exactly what it changed.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFNUQ4NzY3Rjk4MTI1RkQKUldUOUpZSDVaNGRkL2xuYzh4ZmdRWTZWNzJkdFloYm1ac0dBQVNoaG5QWnZuNGhoSVhyL1VUMHEK",
+      "endpoints": [
+        "https://github.com/chirag-gamer/button/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -798,6 +798,18 @@ impl SessionEngine {
             .is_some_and(|j| j.entries.iter().any(|e| e.owner == JournalOwner::Timer))
     }
 
+    /// Spec 7.12 / FR-22: an update may install only when button owns
+    /// nothing: no session in any non-idle state, an empty journal, and
+    /// no unread journal left on disk.
+    pub fn can_install_update(&self) -> bool {
+        self.session.status == SessionStatus::Idle
+            && !self.journal_blocked
+            && self.journal.as_ref().is_none_or(|j| j.entries.is_empty())
+            // A failed delete leaves the file behind; the next start
+            // would recover from it, so it must not meet a new version.
+            && !journal::journal_path(&self.data_dir).exists()
+    }
+
     /// Fires every due Timer entry (spec 7.7). Wall-clock deadlines, so a
     /// deadline missed during sleep fires on the first tick after resume
     /// (FR-28). Never touches the session status or the applied/skipped/
@@ -1840,6 +1852,33 @@ mod tests {
             .set_switch(SwitchId::Taskbar, true, None, now(), &ctx())
             .unwrap_err();
         assert!(matches!(err, SwitchError::NotAvailable(_)));
+    }
+
+    #[test]
+    fn update_install_waits_for_an_empty_journal() {
+        let dir = test_dir("update-gate");
+        let mut rig = build(&dir, |_| manual_opts());
+        assert!(rig.engine.can_install_update(), "fresh engine");
+
+        rig.engine.start(now(), &IDS, &ctx()).unwrap();
+        assert!(!rig.engine.can_install_update(), "active session");
+        rig.engine.stop(later()).unwrap();
+        assert!(rig.engine.can_install_update(), "after restore");
+
+        rig.engine
+            .set_switch(
+                SwitchId::Taskbar,
+                true,
+                Some(OffAfter::At {
+                    at: datetime!(2027-01-01 08:00:00 UTC),
+                }),
+                now(),
+                &ctx(),
+            )
+            .unwrap();
+        assert!(!rig.engine.can_install_update(), "pending timer");
+        rig.engine.restore_all_now(now()).unwrap();
+        assert!(rig.engine.can_install_update(), "timer restored");
     }
 
     #[test]
