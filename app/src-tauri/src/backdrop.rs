@@ -380,6 +380,7 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
         let is_shown = SHOWN.load(Ordering::Relaxed);
+        let monitors = app2.available_monitors().ok();
         let primary_rect = app2
             .primary_monitor()
             .ok()
@@ -391,23 +392,43 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
             None
         };
         let front_rect = anchor.and_then(monitor_rect_of);
-        for w in snapshot {
+        for w in snapshot.iter() {
             if let Some(window) = app2.get_webview_window(&w.label) {
                 let _ = window.set_background_color(Some(tauri::window::Color(r, g, b, 255)));
                 let _ = window.reload();
                 if is_shown {
+                    let mut show_window = setting != crate::settings::BackdropMonitors::Front;
                     let window_monitor = monitor_rect_of(w.hwnd);
                     let effective_primary = primary_rect.or(window_monitor);
-                    let show_window = match setting {
-                        crate::settings::BackdropMonitors::All => true,
-                        crate::settings::BackdropMonitors::Front => {
-                            if let (Some(primary), Some(m)) = (effective_primary, window_monitor) {
-                                shows_on_monitor(setting, front_rect, primary, m)
-                            } else {
-                                false
+                    if let Some(list) = monitors.as_ref() {
+                        match monitor_for(list, w) {
+                            Some(monitor) => {
+                                let _ = window.set_position(*monitor.position());
+                                let _ = window.set_size(*monitor.size());
+                                if let Some(primary) = effective_primary {
+                                    show_window = shows_on_monitor(
+                                        setting,
+                                        front_rect,
+                                        primary,
+                                        monitor_rect(monitor),
+                                    );
+                                }
+                            }
+                            None if w.monitor.is_some() => {
+                                let _ = window.hide();
+                                continue;
+                            }
+                            None => {
+                                if let (Some(primary), Some(m)) =
+                                    (effective_primary, window_monitor)
+                                {
+                                    show_window = shows_on_monitor(setting, front_rect, primary, m);
+                                }
                             }
                         }
-                    };
+                    } else if let (Some(primary), Some(m)) = (effective_primary, window_monitor) {
+                        show_window = shows_on_monitor(setting, front_rect, primary, m);
+                    }
                     if show_window {
                         if let Some(a) = anchor {
                             let _ = window.show();
