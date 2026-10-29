@@ -1,7 +1,8 @@
 //! Foreground tracker (spec 7.8). The WinEvent hook keeps the last few
-//! foreground windows; `front` picks the newest one that is still a valid
-//! window and not on Stays on Screen. The hook callback touches only its
-//! own mutex via `try_lock`: no app state, no blocking, no panic. One
+//! foreground windows; `front` picks the newest one (the live foreground
+//! window counts as the newest) that is still a valid window and not on
+//! Stays on Screen. The hook callback touches only its own mutex via
+//! `try_lock`: no app state, no blocking, no panic. One
 //! exception to the no-I/O rule: while a backdrop is visible, the callback
 //! resolves the foreground window's exe (`backdrop_event_ok`, spec 7.9) —
 //! that path runs only during a backdrop session and never blocks on app
@@ -31,7 +32,7 @@ pub struct FrontApp {
 }
 
 const RING_CAP: usize = 8;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Entry {
     hwnd: isize,
     pid: u32,
@@ -87,18 +88,52 @@ pub fn unhook() {
 /// shell flyout host (spec 7.8, D-066, D-073). The exe lookup runs here,
 /// once per start — never in the hook.
 pub fn front(stays_on_screen: &[String]) -> Option<FrontApp> {
-    let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    pick(&state.ring, stays_on_screen, is_window, exe_of_pid)
+    pick(&ring_now(), stays_on_screen, is_window, exe_of_pid)
 }
 
 /// The backdrop's z-order anchor (spec 7.9): the newest ring entry that
 /// passes the class and exe ignores, WITHOUT the Stays-on-Screen filter —
 /// the backdrop sits behind the recorder too; that is the point of a clean
-/// recording background.
-#[cfg_attr(test, allow(dead_code))] // only show() calls this; stubbed in tests
+/// recording background. Hide Other Apps restacks its restored windows
+/// below the same window.
 pub(crate) fn backdrop_anchor() -> Option<isize> {
-    let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-    pick(&state.ring, &[], is_window, exe_of_pid).map(|f| f.hwnd)
+    pick(&ring_now(), &[], is_window, exe_of_pid).map(|f| f.hwnd)
+}
+
+/// The ring as of now: the live foreground window counts as the newest
+/// entry. The hook alone can trail the screen — it never sees foreground
+/// changes button makes itself (WINEVENT_SKIPOWNPROCESS; Hide Other Apps
+/// hands the focus back on restore) and drops events while the ring is
+/// locked — and a stale entry would make the next start hide the app the
+/// user is on.
+fn ring_now() -> VecDeque<Entry> {
+    let ring = STATE.lock().unwrap_or_else(|p| p.into_inner()).ring.clone();
+    with_live(ring, entry_of(unsafe { GetForegroundWindow() }))
+}
+
+/// Records the window button just gave the focus to (the Hide Other Apps
+/// hand-back). The hook may never see that change (it skips button's own
+/// foreground changes, and GetForegroundWindow can read 0 while the switch
+/// settles), so without this the ring's newest entry could stay on the
+/// window that took the focus during the restore, and the next start from
+/// the tray (where the live foreground is button's own dropdown) would keep
+/// that window in front instead of the one the user is on.
+pub(crate) fn note_foreground(hwnd: HWND) {
+    let live = entry_of(hwnd);
+    let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let ring = std::mem::take(&mut state.ring);
+    state.ring = with_live(ring, live);
+}
+
+fn with_live(mut ring: VecDeque<Entry>, live: Option<Entry>) -> VecDeque<Entry> {
+    if let Some(live) = live
+        && ring
+            .back()
+            .is_none_or(|newest| newest.hwnd != live.hwnd || newest.pid != live.pid)
+    {
+        push_entry(&mut ring, live);
+    }
+    ring
 }
 
 /// Whether a foreground event should move the backdrop (spec 7.9): not a
@@ -137,26 +172,36 @@ unsafe extern "system" fn fg_cb(
 /// Hook-callback side: cheap reads only (class name + pid). Opening the
 /// process to resolve its exe happens in `front()`, off the event path.
 fn record(hwnd: HWND) {
-    if hwnd.is_invalid() {
+    // Out-of-context events arrive queued. One for a window that has lost
+    // the foreground again by now (a restored window that activated itself
+    // before Hide Other Apps handed the focus back) is stale and must not
+    // become the newest entry.
+    if unsafe { GetForegroundWindow() } != hwnd {
         return;
     }
-    let class = class_of(hwnd);
+    let Some(entry) = entry_of(hwnd) else {
+        return;
+    };
+    if let Ok(mut state) = STATE.try_lock() {
+        push_entry(&mut state.ring, entry);
+    }
+}
+
+/// The ring entry for a foreground window, or None for button's own
+/// windows and the ignored shell classes.
+fn entry_of(hwnd: HWND) -> Option<Entry> {
+    if hwnd.is_invalid() {
+        return None;
+    }
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 || pid == std::process::id() {
-        return;
+    if pid == 0 || pid == std::process::id() || is_ignored_class(&class_of(hwnd)) {
+        return None;
     }
-    if let Ok(mut state) = STATE.try_lock()
-        && !is_ignored_class(&class)
-    {
-        push_entry(
-            &mut state.ring,
-            Entry {
-                hwnd: hwnd.0 as isize,
-                pid,
-            },
-        );
-    }
+    Some(Entry {
+        hwnd: hwnd.0 as isize,
+        pid,
+    })
 }
 
 fn pick(
@@ -306,6 +351,23 @@ mod tests {
         push_entry(&mut ring, entry(2, 22)); // process gone since the event
         let picked = pick(&ring, &[], |hwnd| hwnd != 0, exe_of).unwrap();
         assert_eq!(picked.pid, 21);
+    }
+
+    #[test]
+    fn the_live_foreground_window_beats_a_stale_ring() {
+        let mut ring = VecDeque::new();
+        push_entry(&mut ring, entry(1, 1)); // what the hook saw last
+        let now = with_live(ring.clone(), Some(entry(2, 4)));
+        assert_eq!(pick(&now, &[], |_| true, exe_of).unwrap().hwnd, 2);
+        // No usable live window (button's own, a shell surface): the ring.
+        let now = with_live(ring.clone(), None);
+        assert_eq!(pick(&now, &[], |_| true, exe_of).unwrap().hwnd, 1);
+        // Already the newest entry: not pushed twice.
+        assert_eq!(with_live(ring.clone(), Some(entry(1, 1))).len(), 1);
+        // A recycled hwnd now owned by another process is a new entry.
+        let now = with_live(ring, Some(entry(1, 4)));
+        assert_eq!(now.len(), 2);
+        assert_eq!(pick(&now, &[], |_| true, exe_of).unwrap().pid, 4);
     }
 
     #[test]

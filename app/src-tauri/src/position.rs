@@ -121,9 +121,23 @@ pub fn monitor_work_area_at(x: i32, y: i32) -> Option<(ScreenRect, ScreenRect)> 
     }
 }
 
+/// The dropdown's new top edge and height when it fits its content
+/// (pure, unit-tested): the height is capped by the work area, and the
+/// edge nearer the taskbar stays put — a window in the lower half keeps
+/// its bottom (it grows upward), one in the upper half keeps its top.
+pub fn fit_height(win: &ScreenRect, work: &ScreenRect, height: i32) -> (i32, i32) {
+    let h = height.clamp(1, (work.h - 2 * GAP).max(1));
+    let y = if win.center_y() > work.center_y() {
+        win.bottom() - h
+    } else {
+        win.y
+    };
+    (y.clamp(work.y, (work.bottom() - h).max(work.y)), h)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ClickRect, ScreenRect, TaskbarEdge, place, taskbar_edge};
+    use super::{ClickRect, GAP, ScreenRect, TaskbarEdge, fit_height, place, taskbar_edge};
 
     const MONITOR: ScreenRect = ScreenRect {
         x: 0,
@@ -205,5 +219,35 @@ mod tests {
         let (x, y) = place(&click(100, 290), &MONITOR, &work, (320, 440));
         assert_eq!(x, 4);
         assert_eq!(y, 4);
+    }
+
+    #[test]
+    fn fit_keeps_the_taskbar_side_edge() {
+        let work = ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1032,
+        };
+        // Above a bottom taskbar: the bottom edge stays, it grows upward.
+        let low = ScreenRect {
+            x: 1500,
+            y: 548,
+            w: 340,
+            h: 480,
+        };
+        assert_eq!(fit_height(&low, &work, 600), (428, 600));
+        assert_eq!(fit_height(&low, &work, 300), (728, 300));
+        // Below a top taskbar: the top edge stays.
+        let high = ScreenRect {
+            x: 1500,
+            y: 40,
+            w: 340,
+            h: 480,
+        };
+        assert_eq!(fit_height(&high, &work, 600), (40, 600));
+        // Never taller than the work area, never outside it.
+        assert_eq!(fit_height(&low, &work, 5000), (4, 1032 - 2 * GAP));
+        assert_eq!(fit_height(&high, &work, 1000), (32, 1000));
     }
 }

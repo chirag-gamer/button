@@ -10,29 +10,55 @@
     <script type="module" src="/src/dropdown/main.ts" defer></script>
   </head>
   <body>
-    <main class="panel">
+    <!-- Two views in one panel (FR-2, FR-44): the switch list and one
+         switch's detail page. The panel's background drags the window
+         (main.ts), like the Win+V panel. -->
+    <main id="panel" class="panel">
       <div id="hotkey-warning" class="warning" hidden></div>
       <div id="switch-error" class="warning" role="alert" hidden></div>
-      <p id="countdown-line" class="summary" hidden>
-        <span id="countdown-text"></span>
-        <button id="countdown-cancel" class="link">Cancel</button>
-      </p>
-      <p id="limit-line" class="summary" hidden>
-        <span id="limit-text"></span>
-        <button id="extend" class="link">+15 min</button>
-      </p>
-      <section id="card" class="card">
-        <div class="card-text">
-          <h1>Recording Mode</h1>
-          <p id="action-count"></p>
+
+      <div id="view-main" class="view">
+        <section id="card" class="rm-card" aria-labelledby="rm-title">
+          <span class="rm-icon" aria-hidden="true"><span></span></span>
+          <div class="rm-text">
+            <h1 id="rm-title">Recording Mode</h1>
+            <p class="rm-sub">
+              <span id="rm-sub-text"></span>
+              <button id="extend" class="mini-chip" type="button" hidden>
+                +15m
+              </button>
+            </p>
+          </div>
+          <button id="start-restore" class="pill" type="button"></button>
+          <button
+            id="rm-config"
+            class="round"
+            type="button"
+            aria-label="Recording Mode settings"
+            title="Recording Mode settings"
+          ></button>
+        </section>
+
+        <div class="section-head">
+          <span>Switches</span>
+          <span id="switch-summary"></span>
         </div>
-        <button id="start-restore" class="primary"></button>
-      </section>
-      <p id="switch-summary" class="summary" hidden></p>
-      <section id="shelf" class="shelf"></section>
-      <button id="show-all" class="link" hidden>Show all</button>
-      <section id="more" class="shelf" hidden></section>
-      <button id="open-settings" class="link">Settings…</button>
+        <div id="list" class="list scroll"></div>
+
+        <footer class="footer">
+          <button id="show-all" class="foot-link" type="button" hidden></button>
+          <span class="spacer"></span>
+          <button
+            id="open-settings"
+            class="icon-button"
+            type="button"
+            aria-label="Settings"
+            title="Settings"
+          ></button>
+        </footer>
+      </div>
+
+      <div id="view-detail" class="view detail scroll" hidden></div>
     </main>
   </body>
 </html>

@@ -81,7 +81,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                     automation::notify(app, &message.to_string());
                 }
             }
-            "settings" => crate::settings_window::open(app),
+            "settings" => crate::settings_window::open(app, None),
             "quit" => app.exit(0),
             id => {
                 if let Some(switch_id) = id.strip_prefix("switch:") {
@@ -403,6 +403,51 @@ pub fn hide_dropdown(app: &AppHandle) {
     }
 }
 
+/// Resize the dropdown to `css_height` (its content, CSS px) in one
+/// SetWindowPos, so a dropdown that grows upward never flashes at the
+/// wrong place (see position::fit_height for which edge stays).
+pub fn fit_dropdown(window: &tauri::WebviewWindow, css_height: f64) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (Ok(pos), Ok(outer), Ok(inner), Ok(hwnd)) = (
+        window.outer_position(),
+        window.outer_size(),
+        window.inner_size(),
+        window.hwnd(),
+    ) else {
+        return;
+    };
+    let frame = outer.height as i32 - inner.height as i32;
+    let wanted = (css_height * scale).round() as i32 + frame.max(0);
+    let win = crate::position::ScreenRect {
+        x: pos.x,
+        y: pos.y,
+        w: outer.width as i32,
+        h: outer.height as i32,
+    };
+    let Some((_, work)) = crate::position::monitor_work_area_at(win.center_x(), win.center_y())
+    else {
+        return;
+    };
+    let (y, h) = crate::position::fit_height(&win, &work, wanted);
+    if y == win.y && h == win.h {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            None,
+            win.x,
+            y,
+            win.w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// Position the window next to the tray icon's monitor work area.
 fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
     let Some((monitor, work)) =
@@ -420,9 +465,9 @@ fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
-/// Wire blur-close on the dropdown window: hide whenever it loses focus.
-/// The tray press handler samples visibility before this can fire, so the
-/// tray click still closes a dropdown it intentionally hid.
+/// Wire blur-close on the dropdown window: hide whenever another window
+/// takes the focus. The tray press handler samples visibility before this
+/// can fire, so the tray click still closes a dropdown it intentionally hid.
 pub fn attach_blur_close(window: &tauri::WebviewWindow) {
     let handle = window.clone();
     window
@@ -430,9 +475,23 @@ pub fn attach_blur_close(window: &tauri::WebviewWindow) {
         .manage::<WasOpenAtDown>(std::sync::Arc::new(std::sync::Mutex::new(false)));
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
+            // The webview also reports a focus loss when the page starts a
+            // window drag (the OS move loop takes the focus from it), but
+            // the dropdown is still the foreground window then.
+            if is_foreground(&handle) {
+                return;
+            }
             let _ = handle.hide();
         }
     });
+}
+
+fn is_foreground(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    unsafe { GetForegroundWindow().0 == hwnd.0 }
 }
 
 #[cfg(test)]

@@ -5,14 +5,13 @@
 // the single writer, so a partial object is never sent.
 import "./settings.css";
 import "../shared/theme.css";
+import "../shared/swatches.css";
 import { getVersion } from "@tauri-apps/api/app";
 import { eventToAccelerator } from "../shared/accel";
 import {
   AppInfo,
   AppState,
-  Availability,
   BtDevice,
-  GradientPreset,
   IpcError,
   Settings,
   SwitchId,
@@ -23,52 +22,24 @@ import {
   listBtDevices,
   listTrayIcons,
   onSettingsChanged,
+  onSettingsSection,
   onStateChanged,
   openOnboarding,
   pickBackdropPicture,
   saveSettings,
 } from "../shared/ipc";
+import {
+  ACTION_IDS,
+  BLUR_PRESETS,
+  BUILTIN_BACKDROPS,
+  GRADIENTS,
+  LABELS,
+  PRESET_COLOURS,
+  UNAVAILABLE_LABELS,
+  builtinThumb,
+} from "../shared/catalog";
 import { addApp, isExeName, moveApp, removeApp } from "./apps";
 import { moveBetween, reorder, Shelves } from "./shelves";
-
-// Display names mirror the dropdown's LABELS (spec 7.5 catalogue).
-const LABELS: Record<SwitchId, string> = {
-  dnd: "Do Not Disturb",
-  "desktop-icons": "Hide Desktop Icons",
-  "other-apps": "Hide Other Apps",
-  taskbar: "Hide Taskbar",
-  "tray-icons": "Hide Tray Icons",
-  backdrop: "Backdrop",
-  "keep-awake": "Keep Awake",
-  "alert-sounds": "Mute Alert Sounds",
-  "dark-mode": "Dark Mode",
-  "night-light": "Night Light",
-  "screen-saver": "Screen Saver",
-  microphone: "Mute Microphone",
-  "lock-keyboard": "Lock Keyboard",
-  bluetooth: "Bluetooth Headphones",
-};
-
-const UNAVAILABLE_LABELS: Record<Availability, string> = {
-  available: "",
-  "needs-windows-11": "Needs Windows 11",
-  "probe-failed": "Unavailable",
-  "not-built": "Not built yet",
-};
-
-/** The Recording Mode actions in spec 7.1 apply order (FR-40). */
-const ACTION_IDS: SwitchId[] = [
-  "dnd",
-  "alert-sounds",
-  "keep-awake",
-  "other-apps",
-  "backdrop",
-  "desktop-icons",
-  "taskbar",
-  "tray-icons",
-  "dark-mode",
-  "night-light",
-];
 
 /** Every switch in the spec 5.1 catalogue order (FR-44, FR-45). */
 const ALL_SWITCHES: SwitchId[] = [
@@ -99,27 +70,6 @@ const TIME_LIMITS: { minutes: number; label: string }[] = [
   { minutes: 120, label: "2 hours" },
 ];
 
-/** Gradient presets (D-087) with the names the tiles announce. */
-const GRADIENTS: { id: GradientPreset; name: string }[] = [
-  { id: "dusk", name: "Dusk" },
-  { id: "ocean", name: "Ocean" },
-  { id: "ember", name: "Ember" },
-  { id: "forest", name: "Forest" },
-  { id: "violet", name: "Violet" },
-  { id: "slate", name: "Slate" },
-];
-
-/** Preset colours (FR-46) plus the custom picker. The fills live in
- * settings.css: inline styles are banned by the CSP (D-082). */
-const PRESET_COLOURS: { value: string; name: string; className: string }[] = [
-  { value: "#202020", name: "Charcoal", className: "swatch-charcoal" },
-  { value: "#000000", name: "Black", className: "swatch-black" },
-  { value: "#ffffff", name: "White", className: "swatch-white" },
-  { value: "#3a3d45", name: "Slate", className: "swatch-slate" },
-  { value: "#1e4d3b", name: "Forest", className: "swatch-forest" },
-  { value: "#4b2a80", name: "Plum", className: "swatch-plum" },
-];
-
 const SHELF_LABELS: Record<keyof Shelves, string> = {
   shown: "Shown",
   more: "Show all",
@@ -128,6 +78,13 @@ const SHELF_LABELS: Record<keyof Shelves, string> = {
 
 type AppShelf = keyof Settings["apps"];
 type BackdropStyle = Settings["backdrop"]["style"];
+
+declare global {
+  interface Window {
+    /** The section to open on, set by settings_window.rs before load. */
+    __buttonSection?: string;
+  }
+}
 
 let settings: Settings | undefined;
 let state: AppState | undefined;
@@ -204,6 +161,16 @@ for (const item of navItems) {
     if (target) showSection(target);
   });
 }
+
+// The dropdown's chevrons open a section (open_settings(section)): a new
+// window reads it before load, an open one gets the event.
+function openOn(section: string | undefined): void {
+  if (section && document.getElementById(`section-${section}`)) {
+    showSection(`section-${section}`);
+  }
+}
+openOn(window.__buttonSection);
+void onSettingsSection(openOn);
 
 // ---- The one error region (role=alert) ----
 
@@ -292,6 +259,9 @@ const styleRadios = Array.from(
 const monitorRadios = Array.from(
   document.querySelectorAll<HTMLInputElement>('input[name="backdrop-monitors"]'),
 );
+const builtinBlock = byId<HTMLDivElement>("builtin-block");
+const builtinBox = byId<HTMLDivElement>("builtins");
+const blurPresets = byId<HTMLDivElement>("blur-presets");
 const colourBlock = byId<HTMLDivElement>("colour-block");
 const gradientBlock = byId<HTMLDivElement>("gradient-block");
 const pictureBlock = byId<HTMLDivElement>("picture-block");
@@ -369,8 +339,8 @@ function renderActions(): void {
         ? undefined
         : (availability.detail ?? UNAVAILABLE_LABELS[availability.availability]);
 
-    const row = make("div", "row");
-    const checkbox = make("input", "");
+    const row = make("div", "row toggle-row");
+    const checkbox = make("input", "switch");
     checkbox.type = "checkbox";
     checkbox.id = `action-${id}`;
     checkbox.checked = settings.recordingMode.actions.includes(id);
@@ -680,8 +650,8 @@ function renderTrayIcons(): void {
   }
 
   icons.forEach((icon, index) => {
-    const row = make("div", "row");
-    const checkbox = make("input", "");
+    const row = make("div", "row toggle-row");
+    const checkbox = make("input", "switch");
     checkbox.type = "checkbox";
     checkbox.id = `tray-icon-${index}`;
     checkbox.checked = visiblePaths.some(
@@ -823,9 +793,12 @@ function renderBackdrop(): void {
   colourBlock.hidden = backdrop.style !== "color";
   gradientBlock.hidden = backdrop.style !== "gradient";
   pictureBlock.hidden = backdrop.style !== "picture";
+  builtinBlock.hidden = backdrop.style !== "builtin";
 
   renderSwatches();
   renderGradients();
+  renderBuiltins();
+  renderBlurPresets();
   customColour.value = backdrop.color;
   picturePath.textContent = backdrop.picture ?? "No picture chosen.";
   blurRange.value = String(backdrop.blur);
@@ -887,6 +860,51 @@ function renderGradients(): void {
   }
 }
 
+function renderBuiltins(): void {
+  if (!settings) return;
+  const current =
+    settings.backdrop.style === "builtin" ? settings.backdrop.builtin : undefined;
+  builtinBox.replaceChildren();
+  for (const pic of BUILTIN_BACKDROPS) {
+    const button = makeButton(`builtin-${pic.id}`, "", "builtin-tile", pic.name);
+    button.title = pic.name;
+    button.setAttribute("aria-pressed", String(current === pic.id));
+    const img = make("img", "");
+    img.src = builtinThumb(pic.id);
+    img.alt = "";
+    img.draggable = false;
+    button.append(img);
+    button.addEventListener("click", () => {
+      void saveChange((next) => {
+        next.backdrop.builtin = pic.id;
+        next.backdrop.style = "builtin";
+      });
+    });
+    builtinBox.append(button);
+  }
+}
+
+function renderBlurPresets(): void {
+  if (!settings) return;
+  const blur = settings.backdrop.blur;
+  blurPresets.replaceChildren();
+  for (const preset of BLUR_PRESETS) {
+    const button = makeButton(
+      `blur-${preset.px}`,
+      preset.label,
+      "preset",
+      `Blur ${preset.label} (${preset.px} px)`,
+    );
+    button.setAttribute("aria-pressed", String(blur === preset.px));
+    button.addEventListener("click", () => {
+      void saveChange((next) => {
+        next.backdrop.blur = preset.px;
+      });
+    });
+    blurPresets.append(button);
+  }
+}
+
 /** Pick a picture, then save it. `style` is set in the same save when the
  * user asked for the picture style (save_settings rejects a picture style
  * without a path). */
@@ -920,9 +938,10 @@ for (const radio of styleRadios) {
     }
     void saveChange((next) => {
       next.backdrop.style = style;
-      // A gradient style needs a preset (save_settings rejects null, D-087):
-      // the first one stands in until the user picks a tile.
+      // A gradient or built-in style needs its id (save_settings rejects
+      // null, D-087): the first one stands in until the user picks a tile.
       next.backdrop.gradient ??= GRADIENTS[0].id;
+      if (style === "builtin") next.backdrop.builtin ??= BUILTIN_BACKDROPS[0].id;
     });
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatElapsed } from "./format";
+import { formatElapsed, formatLeft } from "./format";
 
 describe("formatElapsed", () => {
   it("formats under an hour as m:ss", () => {
@@ -17,5 +17,20 @@ describe("formatElapsed", () => {
 
   it("treats negative time as zero", () => {
     expect(formatElapsed(-3)).toBe("0:00");
+  });
+});
+
+describe("formatLeft", () => {
+  it("rounds up to whole minutes and never shows zero", () => {
+    expect(formatLeft(0)).toBe("1 min");
+    expect(formatLeft(59)).toBe("1 min");
+    expect(formatLeft(61)).toBe("2 min");
+    expect(formatLeft(30 * 60)).toBe("30 min");
+  });
+
+  it("switches to hours past 59 minutes", () => {
+    expect(formatLeft(60 * 60)).toBe("1 h");
+    expect(formatLeft(90 * 60)).toBe("1 h 30 min");
+    expect(formatLeft(4 * 3600 - 30)).toBe("4 h");
   });
 });

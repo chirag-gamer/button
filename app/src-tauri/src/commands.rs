@@ -304,8 +304,25 @@ pub fn save_settings(
 /// Open (or focus) the Settings window (FR-39). Runs on the async runtime:
 /// WebviewWindowBuilder deadlocks inside sync commands (D-071).
 #[tauri::command]
-pub async fn open_settings(app: AppHandle) {
-    crate::settings_window::open(&app);
+pub async fn open_settings(app: AppHandle, section: Option<String>) {
+    crate::settings_window::open(&app, section.as_deref());
+}
+
+/// The dropdown fits its window to its content (the switch list and the
+/// detail pages differ in height). Height in CSS px; the edge next to the
+/// tray stays put, so a dropdown above a bottom taskbar grows upward.
+#[tauri::command]
+pub fn fit_dropdown(window: tauri::WebviewWindow, height: f64) -> IpcResult<()> {
+    if window.label() != "dropdown" {
+        return Err(IpcError::InvalidArgument(
+            "only the dropdown fits itself".into(),
+        ));
+    }
+    if !(height.is_finite() && height > 0.0) {
+        return Err(IpcError::InvalidArgument("height must be positive".into()));
+    }
+    crate::tray::fit_dropdown(&window, height);
+    Ok(())
 }
 
 /// Open (or focus) the onboarding window without changing any flag

@@ -531,9 +531,10 @@ pub fn image_bytes(app: &AppHandle) -> Vec<u8> {
         match b.settings.backdrop.style {
             crate::settings::BackdropStyle::Picture => b.settings.backdrop.picture.clone(),
             crate::settings::BackdropStyle::Wallpaper => wallpaper_path(),
-            crate::settings::BackdropStyle::Color | crate::settings::BackdropStyle::Gradient => {
-                None
-            }
+            // Built-in pictures ship with the frontend (/backdrops/<id>.jpg).
+            crate::settings::BackdropStyle::Color
+            | crate::settings::BackdropStyle::Gradient
+            | crate::settings::BackdropStyle::Builtin => None,
         }
     };
     let Some(path) = path else {

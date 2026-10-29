@@ -19,10 +19,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 0 0 172px;
-  padding: 14px 10px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
+  flex: 0 0 180px;
+  padding: 16px 10px;
+  background: #1b1b1e;
+  border-right: 1px solid var(--hairline);
 }
 
 .nav-title {
@@ -33,48 +33,68 @@ body {
 }
 
 .nav-item {
-  padding: 7px 8px;
+  position: relative;
+  padding: 8px 10px;
   font: inherit;
   font-size: 13px;
   text-align: left;
-  color: var(--fg);
+  color: var(--muted);
   background: none;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
+  transition:
+    background-color 140ms var(--ease),
+    color 140ms var(--ease);
 }
 
 .nav-item:hover {
-  background: var(--bg);
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .nav-item[aria-current="page"] {
   color: var(--fg);
-  background: var(--bg);
-  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.08);
   font-weight: 600;
+}
+
+/* The Win11-style pill marking the open section. */
+.nav-item[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .content {
   flex: 1;
   min-width: 0;
-  padding: 16px 20px 28px;
+  padding: 20px 24px 32px;
   overflow-y: auto;
 }
 
+.section {
+  max-width: 620px;
+}
+
 .section h2 {
-  margin: 0 0 12px;
-  font-size: 17px;
+  margin: 0 0 14px;
+  font-size: 20px;
   font-weight: 600;
 }
 
 .section h3 {
-  margin: 18px 0 8px;
-  font-size: 13px;
+  margin: 20px 0 8px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .section h4 {
@@ -100,11 +120,28 @@ body {
   color: var(--muted);
 }
 
+/* Each setting is a rounded card row (Levers/iOS grouped list). */
 .field {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
+  gap: 10px;
+  min-height: 44px;
+  margin: 0 0 6px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+/* Sliding switches sit at the row's end, after the label. */
+.toggle-field input.switch,
+.toggle-row input.switch {
+  order: 2;
+  margin-left: auto;
+}
+
+.toggle-row .detail {
+  order: 1;
 }
 
 .field label {
@@ -131,12 +168,12 @@ select:focus-visible,
 input:focus-visible,
 button:focus-visible,
 .swatch:focus-visible,
-.gradient-tile:focus-visible {
+.gradient-tile:focus-visible,
+.builtin-tile:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-input[type="checkbox"],
 input[type="radio"] {
   width: 15px;
   height: 15px;
@@ -150,26 +187,29 @@ input[type="range"] {
 }
 
 fieldset {
-  margin: 0 0 12px;
-  padding: 4px 12px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  border: none;
 }
 
 legend {
-  padding: 0 4px;
-  font-size: 13px;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
   color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 button.secondary {
-  padding: 5px 12px;
+  padding: 6px 14px;
   font: inherit;
   font-size: 13px;
   color: var(--fg);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
   cursor: pointer;
 }
 
@@ -210,22 +250,37 @@ button.icon:disabled {
 .rows {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin: 0 0 6px;
-  padding: 0;
+  margin: 0 0 8px;
+  padding: 4px;
   list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+.rows:empty {
+  display: none;
 }
 
 .row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  min-height: 40px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: 8px;
 }
 
-.row:nth-child(odd) {
-  background: var(--surface);
+.row + .row {
+  box-shadow: 0 -1px 0 var(--hairline);
+}
+
+.row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+label.row {
+  cursor: pointer;
 }
 
 .row .name {
@@ -298,30 +353,6 @@ button.icon:disabled {
   border-color: var(--accent);
 }
 
-/* Preset fills (FR-46) as classes: the CSP forbids inline styles (D-082). */
-.swatch-charcoal {
-  background: #202020;
-}
-
-.swatch-black {
-  background: #000000;
-}
-
-.swatch-white {
-  background: #ffffff;
-}
-
-.swatch-slate {
-  background: #3a3d45;
-}
-
-.swatch-forest {
-  background: #1e4d3b;
-}
-
-.swatch-plum {
-  background: #4b2a80;
-}
 
 /* Gradient preset tiles (D-087): the swatch shows the preset's own
    colours; the class names mirror overlays/backdrop.css. */
@@ -344,29 +375,70 @@ button.icon:disabled {
   border-color: var(--accent);
 }
 
-.gradient-tile.gradient-dusk {
-  background: linear-gradient(135deg, #2b1e4f 0%, #6d3b6e 55%, #c86b5a 100%);
+/* Built-in pictures (schema v2): thumbnails served from /backdrops. */
+.builtins {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
 }
 
-.gradient-tile.gradient-ocean {
-  background: linear-gradient(135deg, #0b2545 0%, #134e6f 55%, #1b9aaa 100%);
+.builtin-tile {
+  aspect-ratio: 16 / 10;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: transform 140ms var(--ease);
 }
 
-.gradient-tile.gradient-ember {
-  background: linear-gradient(135deg, #2b0a0a 0%, #7a1f1f 55%, #e07a3f 100%);
+.builtin-tile:hover {
+  transform: scale(1.03);
 }
 
-.gradient-tile.gradient-forest {
-  background: linear-gradient(135deg, #0c1f16 0%, #1e4d3b 55%, #4f9d69 100%);
+.builtin-tile[aria-pressed="true"] {
+  border-color: var(--accent);
 }
 
-.gradient-tile.gradient-violet {
-  background: linear-gradient(135deg, #1b1030 0%, #4b2a80 55%, #8f6bd6 100%);
+.builtin-tile img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
-.gradient-tile.gradient-slate {
-  background: linear-gradient(135deg, #17181c 0%, #3a3d45 55%, #6f7480 100%);
+/* Blur presets: a segmented row above the fine-grained slider. */
+.presets {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 8px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
 }
+
+.preset {
+  padding: 5px 14px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.preset:hover {
+  color: var(--fg);
+}
+
+.preset[aria-pressed="true"] {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.12);
+}
+
 
 .about-line {
   margin: 0 0 6px;
@@ -402,12 +474,15 @@ button.icon:disabled {
 @media (forced-colors: active) {
   .nav-item[aria-current="page"],
   .swatch,
-  .gradient-tile {
+  .gradient-tile,
+  .builtin-tile {
     border-color: CanvasText;
   }
 
   .swatch[aria-pressed="true"],
-  .gradient-tile[aria-pressed="true"] {
+  .gradient-tile[aria-pressed="true"],
+  .builtin-tile[aria-pressed="true"],
+  .preset[aria-pressed="true"] {
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }

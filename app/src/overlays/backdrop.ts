@@ -3,7 +3,8 @@
 // pictures and the wallpaper on top and fades them with blur/dim. The
 // page reloads whenever settings change (backdrop::restyle), so it reads
 // the current style once on load and listens for nothing.
-import { getBackdropImage, getBackdropStyle } from "../shared/ipc";
+import { builtinPicture } from "../shared/catalog";
+import { Settings, getBackdropImage, getBackdropStyle } from "../shared/ipc";
 import "./backdrop.css";
 
 /** Magic-byte sniff for the blob type (mirrors the Rust reader, which
@@ -52,27 +53,44 @@ async function render(): Promise<void> {
     document.body.classList.add(`gradient-${style.gradient}`);
   }
 
-  if (
-    image &&
-    dim &&
-    (style.style === "picture" || style.style === "wallpaper")
-  ) {
+  if (!image || !dim) return;
+  if (style.style === "builtin" && style.builtin) {
+    // Shipped with the app (same origin, CSP img-src 'self'); the id is
+    // validated in Rust. A failed load leaves the colour layer showing.
+    image.addEventListener("load", () => showImage(image, dim, style), {
+      once: true,
+    });
+    image.src = builtinPicture(style.builtin);
+  } else if (style.style === "picture" || style.style === "wallpaper") {
     const bytes = await getBackdropImage();
     const mime = bytes.byteLength > 0 ? imageMime(bytes) : null;
     if (mime) {
-      const url = await readAsDataURL(new Blob([bytes], { type: mime }));
-      image.src = url;
-      image.hidden = false;
-      if (style.blur > 0) {
-        image.style.filter = `blur(${style.blur}px)`;
-      }
-      if (dim && style.dim > 0) {
-        dim.hidden = false;
-        dim.style.opacity = String(style.dim / 100);
-      }
+      image.src = await readAsDataURL(new Blob([bytes], { type: mime }));
+      showImage(image, dim, style);
     }
     // No usable image: the colour layer stays the backdrop (spec 7.9
     // fallback), nothing to do here.
+  }
+}
+
+/** Reveal the picture layer with the blur and dim amounts (CSSOM, not
+ * inline markup styles: the CSP has no 'unsafe-inline', D-082). */
+function showImage(
+  image: HTMLImageElement,
+  dim: HTMLElement,
+  style: Settings["backdrop"],
+): void {
+  image.hidden = false;
+  if (style.blur > 0) {
+    image.style.filter = `blur(${style.blur}px)`;
+    // Blur fades the edges over ~2 sigma: scale the picture past them
+    // (backdrop.css's 1.06 covers the low presets only).
+    const edge = (style.blur * 4) / Math.min(innerWidth, innerHeight);
+    image.style.transform = `scale(${Math.max(1.06, 1 + edge).toFixed(3)})`;
+  }
+  if (style.dim > 0) {
+    dim.hidden = false;
+    dim.style.opacity = String(style.dim / 100);
   }
 }
 

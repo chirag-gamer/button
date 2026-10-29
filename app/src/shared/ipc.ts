@@ -67,6 +67,13 @@ export type GradientPreset =
   | "violet"
   | "slate";
 
+export type BackdropStyle =
+  | "color"
+  | "gradient"
+  | "picture"
+  | "wallpaper"
+  | "builtin";
+
 export interface Settings {
   schemaVersion: number;
   recordingMode: {
@@ -79,10 +86,12 @@ export interface Settings {
   apps: { staysOnScreen: string[]; hidden: string[] };
   trayIcons: { visible: string[] };
   backdrop: {
-    style: "color" | "gradient" | "picture" | "wallpaper";
+    style: BackdropStyle;
     color: string;
     gradient: GradientPreset | null;
     picture: string | null;
+    /** A built-in picture id (shared/backdrops.ts) when style = builtin. */
+    builtin: string | null;
     blur: number;
     dim: number;
     monitors: "all" | "front";
@@ -178,7 +187,20 @@ export interface TrayIconInfo {
 
 export const listApps = () => call<AppInfo[]>("list_apps");
 export const listTrayIcons = () => call<TrayIconInfo[]>("list_tray_icons");
-export const openSettings = () => call<void>("open_settings");
+/** Settings sections (settings.html's `section-<id>`). */
+export type SettingsSection =
+  | "general"
+  | "recording"
+  | "switches"
+  | "hotkeys"
+  | "backdrop"
+  | "about";
+
+export const openSettings = (section?: SettingsSection) =>
+  call<void>("open_settings", { section });
+/** Fit the dropdown window to its content height (CSS px). */
+export const fitDropdown = (height: number) =>
+  call<void>("fit_dropdown", { height });
 export const openOnboarding = () => call<void>("open_onboarding");
 export const pickBackdropPicture = () =>
   call<string | null>("pick_backdrop_picture");
@@ -199,6 +221,15 @@ export function onStateChanged(
   handler: (state: AppState) => void,
 ): Promise<() => void> {
   return listen<AppState>("state-changed", (event) => handler(event.payload));
+}
+
+/** An open settings window is asked to show a section. */
+export function onSettingsSection(
+  handler: (section: SettingsSection) => void,
+): Promise<() => void> {
+  return listen<SettingsSection>("settings-section", (event) =>
+    handler(event.payload),
+  );
 }
 
 export function onSettingsChanged(handler: (settings: Settings) => void): Promise<() => void> {
