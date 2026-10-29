@@ -45,20 +45,20 @@ import { type IconName, icon } from "../shared/icons";
 
 type SwitchState = AppState["switches"][number];
 
-/** Tile glyph per switch (Fluent names; colours live in the CSS). */
+/** Tile glyph per switch (colours live in the CSS, D-098). */
 const ICONS: Record<SwitchId, IconName> = {
-  dnd: "weather-moon",
-  "desktop-icons": "grid",
-  "other-apps": "window-multiple",
-  taskbar: "panel-bottom",
-  "tray-icons": "eye-off",
+  dnd: "moon",
+  "desktop-icons": "squares-four",
+  "other-apps": "browsers",
+  taskbar: "taskbar",
+  "tray-icons": "eye-slash",
   backdrop: "image",
-  "keep-awake": "drink-coffee",
-  "alert-sounds": "alert",
-  "dark-mode": "dark-theme",
-  "night-light": "weather-sunny-low",
-  "screen-saver": "rectangle-landscape-sparkle",
-  microphone: "mic",
+  "keep-awake": "coffee",
+  "alert-sounds": "bell",
+  "dark-mode": "circle-half",
+  "night-light": "sun-horizon",
+  "screen-saver": "sparkle",
+  microphone: "microphone",
   "lock-keyboard": "keyboard",
   bluetooth: "headphones",
 };
@@ -172,7 +172,7 @@ function isAction(id: SwitchId): boolean {
 function tile(id: SwitchId, size: "row" | "hero"): HTMLElement {
   const t = el("span", `tile tile-${size} t-${id}`);
   t.setAttribute("aria-hidden", "true");
-  t.append(icon(ICONS[id], size === "hero" ? 26 : 16));
+  t.append(icon(ICONS[id], size === "hero" ? 30 : 19));
   return t;
 }
 

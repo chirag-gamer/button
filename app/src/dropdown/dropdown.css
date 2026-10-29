@@ -355,13 +355,21 @@ button:focus-visible {
   cursor: default;
 }
 
-/* Switch tiles: one colour per switch, white Fluent glyph. */
+/* Switch tiles (D-098): one system colour per switch, lit from above
+   (lighter top, a faint top highlight), the white glyph a touch raised. */
 .tile {
   display: grid;
   place-items: center;
   flex: none;
   color: #fff;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--tint) 78%, #fff), var(--tint));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.08);
+}
+
+.tile svg {
+  filter: drop-shadow(0 0.5px 0.6px rgba(0, 0, 0, 0.22));
 }
 
 .tile-row {
@@ -376,47 +384,47 @@ button:focus-visible {
   border-radius: 12px;
 }
 
-.t-dnd {
-  background: linear-gradient(160deg, #a27bff, #6e44e8);
-}
-.t-dark-mode {
-  background: linear-gradient(160deg, #8e8cff, #5652e0);
-}
-.t-desktop-icons {
-  background: linear-gradient(160deg, #5aa2ff, #2f6fe8);
-}
-.t-other-apps {
-  background: linear-gradient(160deg, #4fdbe0, #1fa5b5);
-}
-.t-taskbar {
-  background: linear-gradient(160deg, #6cc4ff, #2f8be0);
-}
-.t-tray-icons {
-  background: linear-gradient(160deg, #8f9bff, #5664e6);
-}
-.t-backdrop {
-  background: linear-gradient(160deg, #3fb6ff, #7a4dff);
-}
 .t-keep-awake {
-  background: linear-gradient(160deg, #ffaa55, #f26b1d);
-}
-.t-alert-sounds {
-  background: linear-gradient(160deg, #ff7aa8, #f03c78);
-}
-.t-night-light {
-  background: linear-gradient(160deg, #ffc55a, #f28c1d);
-}
-.t-screen-saver {
-  background: linear-gradient(160deg, #4fe0a8, #1fa874);
+  --tint: #ff8a1f;
 }
 .t-microphone {
-  background: linear-gradient(160deg, #ff7a6e, #e8433a);
+  --tint: #ff4d4d;
+}
+.t-dark-mode {
+  --tint: #5e5ce6;
 }
 .t-lock-keyboard {
-  background: linear-gradient(160deg, #a8e05a, #5fae2a);
+  --tint: #34c759;
+}
+.t-dnd {
+  --tint: #8e5cf7;
+}
+.t-desktop-icons {
+  --tint: #0a84ff;
+}
+.t-other-apps {
+  --tint: #30b0c7;
+}
+.t-taskbar {
+  --tint: #32ade6;
+}
+.t-tray-icons {
+  --tint: #8e8e93;
+}
+.t-backdrop {
+  --tint: #bf5af2;
+}
+.t-alert-sounds {
+  --tint: #ff375f;
+}
+.t-night-light {
+  --tint: #ffa620;
+}
+.t-screen-saver {
+  --tint: #00c7be;
 }
 .t-bluetooth {
-  background: linear-gradient(160deg, #5a9bff, #2f5fe0);
+  --tint: #3478f6;
 }
 
 /* ---- Footer ---- */
