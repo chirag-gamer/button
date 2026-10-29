@@ -124,7 +124,6 @@ function stopCapture(): void {
  * and a shortcut never triggers anything. A modifier-only press or a key
  * the global-hotkey parser cannot take keeps the capture running. */
 function onCaptureKey(event: KeyboardEvent): void {
-  if (event.repeat) return;
   // Escape cancels instead of saving: it is reserved for unlocking the
   // keyboard, so the core would reject it anyway.
   if (event.key === "Escape" || event.code === "Escape") {
@@ -140,6 +139,7 @@ function onCaptureKey(event: KeyboardEvent): void {
   if (!(event.ctrlKey || event.altKey || event.metaKey)) return;
   event.preventDefault();
   event.stopPropagation();
+  if (event.repeat) return;
   const binding = eventToAccelerator(event);
   if (binding === null) return;
   stopCapture();

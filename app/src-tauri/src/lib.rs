@@ -333,6 +333,7 @@ pub fn run() {
             {
                 for message in failures {
                     log::warn!("{message}");
+                    automation::notify(app.handle(), &message);
                 }
             }
 

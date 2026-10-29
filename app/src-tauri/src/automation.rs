@@ -374,22 +374,28 @@ fn spawn_countdown(app: AppHandle, generation: u64) {
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        if COUNTDOWN_GENERATION.load(Ordering::Relaxed) != generation {
-            return;
-        }
-        // Invalidate this generation so any late-building window self-closes
-        // instead of staying open as an orphan.
-        COUNTDOWN_GENERATION.fetch_add(1, Ordering::Relaxed);
-        crate::countdown::close(&app, generation);
-        // Back to Idle so the engine's start (which requires Idle) runs;
-        // StartNow bypasses the countdown entry, so this cannot loop.
+        // Atomic check-and-invalidate under the state lock: only finish if
+        // this generation still owns the countdown, so a stale thread cannot
+        // invalidate or prematurely start a successor session.
         {
             let state = app.state::<SharedState>();
             let mut b = state.lock().unwrap_or_else(|p| p.into_inner());
+            if COUNTDOWN_GENERATION
+                .compare_exchange(
+                    generation,
+                    generation.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                return;
+            }
             if b.engine.finish_countdown().is_err() {
-                return; // something else changed the state meanwhile
+                return;
             }
         }
+        crate::countdown::close(&app, generation);
         if let Err(message) = run(&app, Action::StartNow) {
             notify(&app, &message.to_string());
         }

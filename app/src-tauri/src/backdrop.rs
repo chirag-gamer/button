@@ -376,10 +376,10 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
     if snapshot.is_empty() {
         return;
     }
-    let is_shown = SHOWN.load(Ordering::Relaxed);
     let setting = backdrop.monitors;
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
+        let is_shown = SHOWN.load(Ordering::Relaxed);
         let primary_rect = app2
             .primary_monitor()
             .ok()
@@ -409,9 +409,13 @@ pub fn restyle(app: &AppHandle, backdrop: &crate::settings::Backdrop) {
                         }
                     };
                     if show_window {
-                        let _ = window.show();
                         if let Some(a) = anchor {
-                            let _ = place_below(w.hwnd, a);
+                            let _ = window.show();
+                            if place_below(w.hwnd, a).is_err() {
+                                let _ = window.hide();
+                            }
+                        } else {
+                            let _ = window.hide();
                         }
                     } else {
                         let _ = window.hide();
