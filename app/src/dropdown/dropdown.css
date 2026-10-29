@@ -355,7 +355,7 @@ button:focus-visible {
   cursor: default;
 }
 
-/* Switch tiles: one colour per switch, white Lucide glyph. */
+/* Switch tiles: one colour per switch, white Fluent glyph. */
 .tile {
   display: grid;
   place-items: center;

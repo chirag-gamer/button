@@ -8,6 +8,8 @@ use std::time::Duration;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
+use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+use windows::Win32::UI::WindowsAndMessaging::SM_CXSMICON;
 
 use crate::automation::{self, Action};
 use crate::switches::SwitchId;
@@ -137,8 +139,26 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     })
 }
 
+/// The tray bitmap size the shell draws (D-097): SM_CXSMICON at the
+/// system DPI, so 16 px at 100 % scale, 20 at 125 %, 24 at 150 %, 32 at
+/// 200 %, 48 at 300 %, 64 at 400 %. Handing over that exact size keeps the
+/// mark sharp instead of letting the shell resample one bitmap.
+fn tray_icon_px() -> i32 {
+    // SAFETY: two metric queries that take and return plain integers.
+    unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }
+}
+
+/// The mark at the smallest pre-rendered size that covers the tray's.
 pub fn idle_icon() -> tauri::image::Image<'static> {
-    tauri::include_image!("icons/tray-idle.png")
+    match tray_icon_px() {
+        ..=16 => tauri::include_image!("icons/tray/idle-16.png"),
+        17..=20 => tauri::include_image!("icons/tray/idle-20.png"),
+        21..=24 => tauri::include_image!("icons/tray/idle-24.png"),
+        25..=32 => tauri::include_image!("icons/tray/idle-32.png"),
+        33..=40 => tauri::include_image!("icons/tray/idle-40.png"),
+        41..=48 => tauri::include_image!("icons/tray/idle-48.png"),
+        _ => tauri::include_image!("icons/tray/idle-64.png"),
+    }
 }
 
 /// The tray menu's switch names (FR-48): the same display names as the
@@ -163,8 +183,17 @@ fn switch_display_name(id: SwitchId) -> &'static str {
     }
 }
 
+/// The red Recording Mode mark, sized like `idle_icon`.
 pub fn active_icon() -> tauri::image::Image<'static> {
-    tauri::include_image!("icons/tray-active.png")
+    match tray_icon_px() {
+        ..=16 => tauri::include_image!("icons/tray/active-16.png"),
+        17..=20 => tauri::include_image!("icons/tray/active-20.png"),
+        21..=24 => tauri::include_image!("icons/tray/active-24.png"),
+        25..=32 => tauri::include_image!("icons/tray/active-32.png"),
+        33..=40 => tauri::include_image!("icons/tray/active-40.png"),
+        41..=48 => tauri::include_image!("icons/tray/active-48.png"),
+        _ => tauri::include_image!("icons/tray/active-64.png"),
+    }
 }
 
 /// One refresh function after every state change (spec 2.5 instruction):

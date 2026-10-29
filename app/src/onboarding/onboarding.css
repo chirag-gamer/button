@@ -49,6 +49,15 @@ body {
   gap: 10px;
 }
 
+.logo {
+  display: block;
+}
+
+/* The tray mark inline in step 3's sentence, sat on the text baseline. */
+.tray-glyph {
+  vertical-align: -3px;
+}
+
 .step-title {
   margin: 0;
   font-size: 18px;

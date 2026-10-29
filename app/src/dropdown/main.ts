@@ -45,20 +45,20 @@ import { type IconName, icon } from "../shared/icons";
 
 type SwitchState = AppState["switches"][number];
 
-/** Row tile icon per switch (Lucide names; colours live in the CSS). */
+/** Tile glyph per switch (Fluent names; colours live in the CSS). */
 const ICONS: Record<SwitchId, IconName> = {
-  dnd: "moon",
-  "desktop-icons": "layout-grid",
-  "other-apps": "app-window",
+  dnd: "weather-moon",
+  "desktop-icons": "grid",
+  "other-apps": "window-multiple",
   taskbar: "panel-bottom",
   "tray-icons": "eye-off",
-  backdrop: "wallpaper",
-  "keep-awake": "coffee",
-  "alert-sounds": "bell-off",
-  "dark-mode": "sun-moon",
-  "night-light": "sunset",
-  "screen-saver": "monitor-play",
-  microphone: "mic-off",
+  backdrop: "image",
+  "keep-awake": "drink-coffee",
+  "alert-sounds": "alert",
+  "dark-mode": "dark-theme",
+  "night-light": "weather-sunny-low",
+  "screen-saver": "rectangle-landscape-sparkle",
+  microphone: "mic",
   "lock-keyboard": "keyboard",
   bluetooth: "headphones",
 };
@@ -172,7 +172,7 @@ function isAction(id: SwitchId): boolean {
 function tile(id: SwitchId, size: "row" | "hero"): HTMLElement {
   const t = el("span", `tile tile-${size} t-${id}`);
   t.setAttribute("aria-hidden", "true");
-  t.append(icon(ICONS[id], size === "hero" ? 22 : 15));
+  t.append(icon(ICONS[id], size === "hero" ? 26 : 16));
   return t;
 }
 
@@ -297,7 +297,7 @@ function makeRow(id: SwitchId): Row {
     chevron.id = `more-${id}`;
     chevron.setAttribute("aria-label", `${LABELS[id]} options`);
     chevron.title = "Options";
-    chevron.append(icon("chevron-right", 14));
+    chevron.append(icon("chevron-right", 16));
     chevron.addEventListener("click", (e) => {
       e.stopPropagation();
       openDetail(id);
@@ -370,7 +370,7 @@ function renderList(): void {
   const more = settings.dropdown.more.filter((id) => byId(id)).length;
   showAllButton.hidden = more === 0;
   showAllButton.replaceChildren(
-    icon("chevron-down", 14),
+    icon("chevron-down", 16),
     document.createTextNode(showAll ? "Show less" : `Show ${more} more`),
   );
   showAllButton.setAttribute("aria-expanded", String(showAll));
@@ -543,9 +543,9 @@ function keepAwakeBoxes(): { els: HTMLElement[]; update(): void } {
 
   const seg = el("div", "segmented");
   const timerSeg = button("seg");
-  timerSeg.append(icon("timer", 14), document.createTextNode("Timer"));
+  timerSeg.append(icon("timer", 16), document.createTextNode("Timer"));
   const noEndSeg = button("seg");
-  noEndSeg.append(icon("infinity", 14), document.createTextNode("No end"));
+  noEndSeg.append(icon("timer-off", 16), document.createTextNode("No end"));
   seg.append(timerSeg, noEndSeg);
 
   const readout = el("div", "readout");
@@ -667,7 +667,7 @@ function bluetoothBox(): { el: HTMLElement; update(): void } {
             .join(" · "),
         );
         const check = el("span", "pick-check");
-        if (device.id === chosen) check.append(icon("check", 14));
+        if (device.id === chosen) check.append(icon("checkmark", 16));
         item.append(name, meta, check);
         item.addEventListener("click", () => {
           setBluetoothDevice(device.id)
@@ -866,7 +866,7 @@ function buildDetail(id: SwitchId): Detail {
   }
 
   const settingsLink = button("foot-link");
-  settingsLink.append(document.createTextNode("More in Settings"), icon("chevron-right", 14));
+  settingsLink.append(document.createTextNode("More in Settings"), icon("chevron-right", 16));
   // The settings that go deeper than this page: the backdrop picture and
   // dim, the Stays on Screen apps, the shelves and per-switch options.
   const section =
