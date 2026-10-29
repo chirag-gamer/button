@@ -59,7 +59,7 @@ Every installer is built by GitHub Actions straight from the code in this repo, 
 
 ### Uninstall
 
-Open **Settings > Apps > Installed apps**, find button and choose **Uninstall**. If Recording Mode is on, button puts everything back first.
+Open **Settings > Apps > Installed apps** (on Windows 10: **Settings > Apps > Apps & features**), find button and choose **Uninstall**. If Recording Mode is on, button puts everything back first.
 
 ### Windows 10
 

@@ -21,12 +21,15 @@ jobs:
       - uses: actions/checkout@v4
 
       # The updater compares versions, so the tag must match the app.
+      # The tag goes through env, never into the script text.
       - name: Check the tag matches the app version
         shell: pwsh
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
           $version = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            throw "Tag ${{ github.ref_name }} does not match the app version $version"
+          if ("v$version" -ne $env:TAG_NAME) {
+            throw "Tag $env:TAG_NAME does not match the app version $version"
           }
 
       - uses: actions/setup-node@v4
@@ -61,8 +64,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
         run: |
           $installer = Get-ChildItem app/src-tauri/target/release/bundle/nsis/*-setup.exe
           if (@($installer).Count -ne 1) { throw "Expected one NSIS installer, found $(@($installer).Count)" }
           Copy-Item $installer.FullName button-setup.exe
-          gh release upload "${{ github.ref_name }}" button-setup.exe --clobber
+          gh release upload $env:TAG_NAME button-setup.exe --clobber

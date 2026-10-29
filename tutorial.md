@@ -46,7 +46,7 @@ Changes to the UI show up right away. Changes to the Rust code rebuild and resta
 npm run tauri build
 ```
 
-The first build also downloads the NSIS tools Tauri uses to make the installer. The installer ends up in `app\src-tauri\target\release\bundle\nsis\` as `button_<version>_x64-setup.exe`. Your build isn't code-signed, same as the official one, so Windows may show the SmartScreen warning described in the [README](README.md#windows-protected-your-pc).
+The first build also downloads the NSIS tools Tauri uses to make the installer. The installer ends up in `src-tauri\target\release\bundle\nsis\` (inside `app`) as `button_<version>_x64-setup.exe`. Your build isn't code-signed, same as the official one, so Windows may show the SmartScreen warning described in the [README](README.md#windows-protected-your-pc).
 
 Your build doesn't need any keys. Only the official release adds the update signature, and that happens on GitHub Actions.
 

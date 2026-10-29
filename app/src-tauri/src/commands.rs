@@ -361,7 +361,9 @@ pub async fn check_update(app: AppHandle) -> IpcResult<UpdateCheck> {
 pub async fn install_update(app: AppHandle) -> IpcResult<()> {
     crate::updater::install(&app).await.map_err(|e| match e {
         crate::updater::InstallError::SessionActive => IpcError::SessionActive(e.to_string()),
-        crate::updater::InstallError::NoUpdate => IpcError::NotAvailable(e.to_string()),
+        crate::updater::InstallError::NoUpdate | crate::updater::InstallError::Busy => {
+            IpcError::NotAvailable(e.to_string())
+        }
         crate::updater::InstallError::Failed(_) => IpcError::OsError(e.to_string()),
     })
 }

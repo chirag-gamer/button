@@ -9,6 +9,7 @@
 //!   anything (SESSION_ACTIVE). The plugin then runs the passive NSIS
 //!   installer and exits the app; the installer starts it again.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
@@ -24,6 +25,8 @@ pub enum InstallError {
     SessionActive,
     #[error("No update is waiting. Check for updates first")]
     NoUpdate,
+    #[error("The update is already downloading")]
+    Busy,
     #[error("The update failed: {0}")]
     Failed(String),
 }
@@ -60,9 +63,29 @@ pub async fn check(app: &AppHandle) -> Result<Option<String>, String> {
     Ok(version)
 }
 
+/// Set while an install runs, so a second click (tray or Settings) can't
+/// start a second download.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Clears INSTALLING on every early return.
+struct InstallGuard;
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Downloads the waiting update, checks its signature, and runs the
 /// installer. On success the process exits inside this call.
 pub async fn install(app: &AppHandle) -> Result<(), InstallError> {
+    if INSTALLING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(InstallError::Busy);
+    }
+    let _guard = InstallGuard;
     let mut update = {
         let state = app.state::<SharedState>();
         let b = state.lock().unwrap_or_else(|p| p.into_inner());

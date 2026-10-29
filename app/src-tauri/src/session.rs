@@ -805,6 +805,9 @@ impl SessionEngine {
         self.session.status == SessionStatus::Idle
             && !self.journal_blocked
             && self.journal.as_ref().is_none_or(|j| j.entries.is_empty())
+            // A failed delete leaves the file behind; the next start
+            // would recover from it, so it must not meet a new version.
+            && !journal::journal_path(&self.data_dir).exists()
     }
 
     /// Fires every due Timer entry (spec 7.7). Wall-clock deadlines, so a
