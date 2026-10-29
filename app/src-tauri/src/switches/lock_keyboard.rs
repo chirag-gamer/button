@@ -1,9 +1,10 @@
 //! Lock Keyboard (FR-34, spec 7.10, task 4.6). A dedicated thread installs
 //! `WH_KEYBOARD_LL` and swallows every key except Esc, which unlocks. The
 //! callback does no I/O (LowLevelHooksTimeout, research/02). An overlay
-//! window (lock.html) offers a mouse Unlock button — built lazily on the
-//! hook thread, because `WebviewWindowBuilder` deadlocks in sync commands
-//! on the main thread (D-071's finding).
+//! window (lock.html) offers a mouse Unlock button. It is built on its own
+//! thread (D-095): `WebviewWindowBuilder` deadlocks in sync commands on the
+//! main thread (D-071's finding), and building it on the hook thread made
+//! the lock wait on a main thread that was waiting on the lock.
 //!
 //! Limits (spec 7.10): Ctrl+Alt+Del and Win+L cannot be blocked; elevated
 //! windows still receive keys (UIPI); Alt+R is swallowed while locked; if
@@ -14,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+#[cfg(not(test))]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Everything Windows-hook related lives on the real lock thread, which
@@ -44,12 +47,21 @@ static LOCKED: AtomicBool = AtomicBool::new(false);
 /// `done` closes when the thread has finished unlocking.
 #[cfg(not(test))]
 struct HookHandle {
+    /// The hook thread, for WM_QUIT.
     tid: u32,
+    /// This lock's number. Ownership checks and the overlay label use it,
+    /// not `tid`: the overlay thread can outlive the hook thread, and
+    /// Windows may give a later lock thread the same id.
+    generation: u64,
     done: std::sync::mpsc::Receiver<()>,
 }
 
 #[cfg(not(test))]
 static HOOK_THREAD: Mutex<Option<HookHandle>> = Mutex::new(None);
+
+/// Source of `HookHandle::generation`.
+#[cfg(not(test))]
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// The overlay and the post-unlock refresh need window access (D-074's
 /// cfg split applies to everything below that touches Tauri windows).
@@ -203,7 +215,7 @@ fn lock() -> Result<(), SwitchError> {
     Ok(())
 }
 
-/// The lock's own thread: message queue, hook, overlay, message loop. On
+/// The lock's own thread: message queue, hook, overlay thread, message loop. On
 /// WM_QUIT (Esc or the Unlock button): unhook, clear the state it owns,
 /// destroy the overlay, refresh the UI, and close the done channel.
 #[cfg(not(test))]
@@ -238,16 +250,26 @@ fn hook_thread(
     // finding: the parent used to write these after the handshake).
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-    *HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()) =
-        Some(HookHandle { tid, done: done_rx });
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    *HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner()) = Some(HookHandle {
+        tid,
+        generation,
+        done: done_rx,
+    });
     LOCKED.store(true, Ordering::SeqCst);
 
     // The overlay is a convenience; a failed build must not stop the
-    // lock (Esc still unlocks).
-    if let Some(app) = &app
-        && let Err(e) = build_overlay(app)
-    {
-        log::warn!("lock-keyboard: overlay failed: {e}");
+    // lock (Esc still unlocks). Its builder blocks until the main thread
+    // creates the window, and the main thread is usually inside lock()
+    // waiting for the readiness below, so the build gets its own thread
+    // (D-095). The hook thread must keep pumping: the hook runs on it.
+    if let Some(app) = app.clone() {
+        let spawned = std::thread::Builder::new()
+            .name("lock-overlay".into())
+            .spawn(move || build_overlay(&app, generation));
+        if let Err(e) = spawned {
+            log::warn!("lock-keyboard: overlay thread failed: {e}");
+        }
     }
 
     let _ = tx.send(Ok(()));
@@ -259,11 +281,11 @@ fn hook_thread(
         let _ = UnhookWindowsHookEx(hook);
     }
     // A wedged thread that outlives unlock()'s 500 ms wait must not wipe a
-    // NEWER lock's state or overlay: touch anything only when the installed
-    // handle is still ours (or gone, i.e. unlock() already took it).
+    // NEWER lock's state: touch it only when the installed handle is still
+    // ours (or gone, i.e. unlock() already took it).
     let newer_lock_installed = {
         let mut slot = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner());
-        let newer = matches!(*slot, Some(ref handle) if handle.tid != tid);
+        let newer = matches!(*slot, Some(ref handle) if handle.generation != generation);
         if !newer {
             *slot = None;
             LOCKED.store(false, Ordering::SeqCst);
@@ -271,47 +293,65 @@ fn hook_thread(
         newer
     };
     let _ = done_tx.send(());
-    if let Some(app) = &app
-        && !newer_lock_installed
-    {
+    if let Some(app) = &app {
+        // This lock's overlay only (its label carries the generation): a newer
+        // lock's overlay is never touched. A build still in flight finds
+        // the lock gone and destroys its own window (build_overlay).
         let for_closure = app.clone();
+        let label = overlay_label(generation);
         let _ = app.run_on_main_thread(move || {
-            // Re-check INSIDE the closure: the queue-time check above races
-            // a lock installed while this closure waited in the main
-            // thread's queue. Ownership is held across check+destroy, and
-            // the new lock installs its handle before any overlay exists,
-            // so seeing None/own tid here means no newer overlay can be
-            // under construction — destroy is safe.
-            let newer_installed = {
-                let slot = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner());
-                matches!(*slot, Some(ref handle) if handle.tid != tid)
-            };
-            if !newer_installed && let Some(window) = for_closure.get_webview_window("lock") {
+            if let Some(window) = for_closure.get_webview_window(&label) {
                 let _ = window.destroy();
             }
         });
-        crate::automation::refresh_switches(app);
+        if !newer_lock_installed {
+            crate::automation::refresh_switches(app);
+        }
     }
 }
 
-/// "Keyboard locked. Press Esc or click Unlock." — small, centred, never
-/// focused so it cannot steal a keystroke from the hook.
+/// One overlay label per lock (the countdown's per-generation pattern):
+/// each lock only ever destroys its own overlay.
 #[cfg(not(test))]
-fn build_overlay(app: &tauri::AppHandle) -> tauri::Result<()> {
+fn overlay_label(generation: u64) -> String {
+    format!("lock-{generation}")
+}
+
+/// Whether lock `generation` is still the installed one.
+#[cfg(not(test))]
+fn lock_is_current(generation: u64) -> bool {
+    let slot = HOOK_THREAD.lock().unwrap_or_else(|p| p.into_inner());
+    matches!(*slot, Some(ref handle) if handle.generation == generation)
+}
+
+/// "Keyboard locked. Press Esc or click Unlock." — small, centred, never
+/// focused so it cannot steal a keystroke from the hook. Runs on the
+/// lock-overlay thread. If the lock ended while the window was building,
+/// the hook thread's cleanup found nothing to destroy, so this does it.
+#[cfg(not(test))]
+fn build_overlay(app: &tauri::AppHandle, generation: u64) {
     use tauri::WebviewUrl;
-    if app.get_webview_window("lock").is_some() {
-        return Ok(()); // a leftover window from an interrupted unlock
+    let built = tauri::WebviewWindowBuilder::new(
+        app,
+        overlay_label(generation),
+        WebviewUrl::App("lock.html".into()),
+    )
+    .title("button")
+    .inner_size(360.0, 120.0)
+    .center()
+    .decorations(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .focusable(false)
+    .build();
+    match built {
+        Ok(window) => {
+            if !lock_is_current(generation) {
+                let _ = window.destroy();
+            }
+        }
+        Err(e) => log::warn!("lock-keyboard: overlay failed: {e}"),
     }
-    tauri::WebviewWindowBuilder::new(app, "lock", WebviewUrl::App("lock.html".into()))
-        .title("button")
-        .inner_size(360.0, 120.0)
-        .center()
-        .decorations(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .focusable(false)
-        .build()?;
-    Ok(())
 }
 
 #[cfg(test)]

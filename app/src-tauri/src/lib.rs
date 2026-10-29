@@ -315,7 +315,7 @@ pub fn run() {
                 tauri::WebviewUrl::App("dropdown.html".into()),
             )
             .title("button")
-            .inner_size(320.0, 440.0)
+            .inner_size(340.0, 480.0)
             .decorations(false)
             .skip_taskbar(true)
             .always_on_top(true)
@@ -386,6 +386,7 @@ pub fn run() {
             crate::commands::get_backdrop_style,
             crate::commands::get_backdrop_image,
             crate::commands::open_settings,
+            crate::commands::fit_dropdown,
             crate::commands::open_onboarding,
         ])
         .build(tauri::generate_context!())

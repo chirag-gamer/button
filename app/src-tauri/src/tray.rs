@@ -8,6 +8,8 @@ use std::time::Duration;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
+use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+use windows::Win32::UI::WindowsAndMessaging::SM_CXSMICON;
 
 use crate::automation::{self, Action};
 use crate::switches::SwitchId;
@@ -81,7 +83,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
                     automation::notify(app, &message.to_string());
                 }
             }
-            "settings" => crate::settings_window::open(app),
+            "settings" => crate::settings_window::open(app, None),
             "quit" => app.exit(0),
             id => {
                 if let Some(switch_id) = id.strip_prefix("switch:") {
@@ -137,8 +139,26 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     })
 }
 
+/// The tray bitmap size the shell draws (D-097): SM_CXSMICON at the
+/// system DPI, so 16 px at 100 % scale, 20 at 125 %, 24 at 150 %, 32 at
+/// 200 %, 48 at 300 %, 64 at 400 %. Handing over that exact size keeps the
+/// mark sharp instead of letting the shell resample one bitmap.
+fn tray_icon_px() -> i32 {
+    // SAFETY: two metric queries that take and return plain integers.
+    unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }
+}
+
+/// The mark at the smallest pre-rendered size that covers the tray's.
 pub fn idle_icon() -> tauri::image::Image<'static> {
-    tauri::include_image!("icons/tray-idle.png")
+    match tray_icon_px() {
+        ..=16 => tauri::include_image!("icons/tray/idle-16.png"),
+        17..=20 => tauri::include_image!("icons/tray/idle-20.png"),
+        21..=24 => tauri::include_image!("icons/tray/idle-24.png"),
+        25..=32 => tauri::include_image!("icons/tray/idle-32.png"),
+        33..=40 => tauri::include_image!("icons/tray/idle-40.png"),
+        41..=48 => tauri::include_image!("icons/tray/idle-48.png"),
+        _ => tauri::include_image!("icons/tray/idle-64.png"),
+    }
 }
 
 /// The tray menu's switch names (FR-48): the same display names as the
@@ -163,8 +183,17 @@ fn switch_display_name(id: SwitchId) -> &'static str {
     }
 }
 
+/// The red Recording Mode mark, sized like `idle_icon`.
 pub fn active_icon() -> tauri::image::Image<'static> {
-    tauri::include_image!("icons/tray-active.png")
+    match tray_icon_px() {
+        ..=16 => tauri::include_image!("icons/tray/active-16.png"),
+        17..=20 => tauri::include_image!("icons/tray/active-20.png"),
+        21..=24 => tauri::include_image!("icons/tray/active-24.png"),
+        25..=32 => tauri::include_image!("icons/tray/active-32.png"),
+        33..=40 => tauri::include_image!("icons/tray/active-40.png"),
+        41..=48 => tauri::include_image!("icons/tray/active-48.png"),
+        _ => tauri::include_image!("icons/tray/active-64.png"),
+    }
 }
 
 /// One refresh function after every state change (spec 2.5 instruction):
@@ -403,6 +432,51 @@ pub fn hide_dropdown(app: &AppHandle) {
     }
 }
 
+/// Resize the dropdown to `css_height` (its content, CSS px) in one
+/// SetWindowPos, so a dropdown that grows upward never flashes at the
+/// wrong place (see position::fit_height for which edge stays).
+pub fn fit_dropdown(window: &tauri::WebviewWindow, css_height: f64) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let (Ok(pos), Ok(outer), Ok(inner), Ok(hwnd)) = (
+        window.outer_position(),
+        window.outer_size(),
+        window.inner_size(),
+        window.hwnd(),
+    ) else {
+        return;
+    };
+    let frame = outer.height as i32 - inner.height as i32;
+    let wanted = (css_height * scale).round() as i32 + frame.max(0);
+    let win = crate::position::ScreenRect {
+        x: pos.x,
+        y: pos.y,
+        w: outer.width as i32,
+        h: outer.height as i32,
+    };
+    let Some((_, work)) = crate::position::monitor_work_area_at(win.center_x(), win.center_y())
+    else {
+        return;
+    };
+    let (y, h) = crate::position::fit_height(&win, &work, wanted);
+    if y == win.y && h == win.h {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            None,
+            win.x,
+            y,
+            win.w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// Position the window next to the tray icon's monitor work area.
 fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
     let Some((monitor, work)) =
@@ -420,9 +494,9 @@ fn place_at(window: &tauri::WebviewWindow, click: crate::position::ClickRect) {
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
-/// Wire blur-close on the dropdown window: hide whenever it loses focus.
-/// The tray press handler samples visibility before this can fire, so the
-/// tray click still closes a dropdown it intentionally hid.
+/// Wire blur-close on the dropdown window: hide whenever another window
+/// takes the focus. The tray press handler samples visibility before this
+/// can fire, so the tray click still closes a dropdown it intentionally hid.
 pub fn attach_blur_close(window: &tauri::WebviewWindow) {
     let handle = window.clone();
     window
@@ -430,9 +504,23 @@ pub fn attach_blur_close(window: &tauri::WebviewWindow) {
         .manage::<WasOpenAtDown>(std::sync::Arc::new(std::sync::Mutex::new(false)));
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
+            // The webview also reports a focus loss when the page starts a
+            // window drag (the OS move loop takes the focus from it), but
+            // the dropdown is still the foreground window then.
+            if is_foreground(&handle) {
+                return;
+            }
             let _ = handle.hide();
         }
     });
+}
+
+fn is_foreground(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    unsafe { GetForegroundWindow().0 == hwnd.0 }
 }
 
 #[cfg(test)]

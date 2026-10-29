@@ -12,9 +12,11 @@ use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SW_MINIMIZE, SetWindowPlacement,
-    ShowWindowAsync, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowPlacement, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, SW_MINIMIZE, SW_SHOWMAXIMIZED, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SetForegroundWindow, SetWindowPlacement, SetWindowPos,
+    ShowWindowAsync, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows::core::BOOL;
 
@@ -139,12 +141,24 @@ impl Switch for OtherApps {
         Ok(())
     }
 
+    /// Puts the windows back without burying the app the user is on.
+    /// The journal lists them top to bottom (EnumWindows order); restoring
+    /// that order with activating show commands left the bottom window in
+    /// front and the front app underneath everything (2026 repro). So:
+    /// restore bottom-up without activation, then restack the restored
+    /// windows in their original order directly below the front app, and
+    /// hand the focus back to it if a restore took it anyway.
     fn restore(&self, e: &JournalEntry) -> Result<RestoreOutcome, SwitchError> {
         let after = parse_state::<State>(&e.after, "other apps")?;
+        // The window the user is on now (button and shell surfaces never
+        // count). None after a crash: then there is nothing to keep in
+        // front and the windows only come back.
+        let anchor = crate::front::backdrop_anchor().and_then(hwnd_of);
         let mut restored = 0;
         let mut user_changed = 0;
         let mut last_error: Option<SwitchError> = None;
-        for entry in after.windows {
+        let mut back: Vec<isize> = Vec::new();
+        for entry in after.windows.into_iter().rev() {
             let Some(hwnd) = hwnd_of(entry.hwnd) else {
                 continue;
             };
@@ -165,8 +179,27 @@ impl Switch for OtherApps {
                     log::info!("other-apps: hwnd {raw:#x} is no longer minimized; leaving it");
                     continue;
                 }
-                match SetWindowPlacement(hwnd, &placement_of_entry(&entry)) {
-                    Ok(()) => restored += 1,
+                if IsHungAppWindow(hwnd).as_bool() {
+                    // SetWindowPlacement sends to the window's thread: a
+                    // hung app would block the whole restore (spec 7.8).
+                    // It fails the entry like a refused SetWindowPlacement:
+                    // the user sees it in the failed list instead of a
+                    // window silently left minimized.
+                    let raw = entry.hwnd;
+                    log::warn!("other-apps: hwnd {raw:#x} is not responding; leaving it minimized");
+                    last_error = Some(SwitchError::NotAvailable(format!(
+                        "{} is not responding and stays minimized",
+                        entry.exe
+                    )));
+                    continue;
+                }
+                let mut placement = placement_of_entry(&entry);
+                placement.showCmd = restore_show_cmd(entry.placement.show_cmd);
+                match SetWindowPlacement(hwnd, &placement) {
+                    Ok(()) => {
+                        restored += 1;
+                        back.push(entry.hwnd);
+                    }
                     Err(err) => {
                         // Swallowing this would drop the journaled entry
                         // with the window still minimized and no record
@@ -181,6 +214,11 @@ impl Switch for OtherApps {
                     }
                 }
             }
+        }
+        // `back` is bottom-up; the restack wants the original top-down order.
+        back.reverse();
+        if let Some(anchor) = anchor {
+            restack_below(anchor, &back);
         }
         if let Some(e) = last_error {
             return Err(e);
@@ -198,6 +236,75 @@ impl Switch for OtherApps {
         parse_state::<State>(value, "other apps")
             .map(|state| state.windows.is_empty())
             .unwrap_or(false)
+    }
+}
+
+/// The show command a journaled window comes back with: maximized stays
+/// maximized (Windows has no non-activating maximize; the restack and the
+/// focus hand-back below undo the activation), everything else returns to
+/// its normal placement without taking the focus.
+fn restore_show_cmd(saved: u32) -> u32 {
+    if saved == SW_SHOWMAXIMIZED.0 as u32 {
+        SW_SHOWMAXIMIZED.0 as u32
+    } else {
+        SW_SHOWNOACTIVATE.0 as u32
+    }
+}
+
+/// `(window, insert_after)` pairs that stack `windows` (top-down) as a
+/// block directly below `anchor`, keeping their order.
+fn restack_plan(anchor: isize, windows: &[isize]) -> Vec<(isize, isize)> {
+    let mut previous = anchor;
+    windows
+        .iter()
+        .filter(|&&w| w != anchor)
+        .map(|&w| {
+            let pair = (w, previous);
+            previous = w;
+            pair
+        })
+        .collect()
+}
+
+/// Restack the restored windows below the front app, then give the focus
+/// back to it when a restore (a maximized one) took it. Best effort: a
+/// failed SetWindowPos only costs the order. A topmost anchor is left
+/// alone, since inserting below it would make the windows topmost too.
+fn restack_below(anchor: HWND, windows: &[isize]) {
+    unsafe {
+        // A front app that closed or got minimized meanwhile has no place
+        // in the stack to keep: the windows just stay where they came back.
+        if !IsWindow(Some(anchor)).as_bool() || IsIconic(anchor).as_bool() {
+            return;
+        }
+        let topmost = GetWindowLongPtrW(anchor, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
+        if !topmost {
+            for (w, after) in restack_plan(anchor.0 as isize, windows) {
+                let (Some(w), Some(after)) = (hwnd_of(w), hwnd_of(after)) else {
+                    continue;
+                };
+                let _ = SetWindowPos(
+                    w,
+                    Some(after),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                );
+            }
+        }
+        let foreground = GetForegroundWindow().0 as isize;
+        let handed_back = windows.contains(&foreground) && SetForegroundWindow(anchor).as_bool();
+        if handed_back {
+            crate::front::note_foreground(anchor);
+        }
+        let raw = anchor.0 as isize;
+        let now = GetForegroundWindow().0 as isize;
+        log::info!(
+            "other-apps: {} window(s) back below {raw:#x}; foreground was {foreground:#x}, handed back: {handed_back}, now {now:#x}",
+            windows.len()
+        );
     }
 }
 
@@ -458,6 +565,37 @@ mod tests {
             !keep(&entry(5, "OBS64.EXE"), None, 1, &stays),
             "case-insensitive"
         );
+    }
+
+    #[test]
+    fn restore_never_activates_except_for_maximized_windows() {
+        assert_eq!(
+            restore_show_cmd(1),
+            SW_SHOWNOACTIVATE.0 as u32,
+            "SW_SHOWNORMAL"
+        );
+        assert_eq!(
+            restore_show_cmd(3),
+            SW_SHOWMAXIMIZED.0 as u32,
+            "SW_SHOWMAXIMIZED"
+        );
+        assert_eq!(
+            restore_show_cmd(0),
+            SW_SHOWNOACTIVATE.0 as u32,
+            "unexpected values too"
+        );
+    }
+
+    #[test]
+    fn restack_keeps_the_original_order_below_the_anchor() {
+        // Repro order before Recording Mode: chrome (front), then a, b, c.
+        assert_eq!(
+            restack_plan(9, &[0xa, 0xb, 0xc]),
+            vec![(0xa, 9), (0xb, 0xa), (0xc, 0xb)]
+        );
+        assert!(restack_plan(9, &[]).is_empty());
+        // The anchor itself never gets inserted after itself.
+        assert_eq!(restack_plan(9, &[9, 0xa]), vec![(0xa, 9)]);
     }
 
     #[test]

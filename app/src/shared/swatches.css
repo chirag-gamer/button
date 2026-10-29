@@ -1,0 +1,50 @@
+/* Backdrop preset fills (FR-46, D-087) shared by the settings window and
+   the dropdown's backdrop page. Classes, not inline styles: the CSP has no
+   'unsafe-inline' (D-082). The gradient colours mirror overlays/backdrop.css. */
+.swatch-charcoal {
+  background: #202020;
+}
+
+.swatch-black {
+  background: #000000;
+}
+
+.swatch-white {
+  background: #ffffff;
+}
+
+.swatch-slate {
+  background: #3a3d45;
+}
+
+.swatch-forest {
+  background: #1e4d3b;
+}
+
+.swatch-plum {
+  background: #4b2a80;
+}
+
+.gradient-tile.gradient-dusk {
+  background: linear-gradient(135deg, #2b1e4f 0%, #6d3b6e 55%, #c86b5a 100%);
+}
+
+.gradient-tile.gradient-ocean {
+  background: linear-gradient(135deg, #0b2545 0%, #134e6f 55%, #1b9aaa 100%);
+}
+
+.gradient-tile.gradient-ember {
+  background: linear-gradient(135deg, #2b0a0a 0%, #7a1f1f 55%, #e07a3f 100%);
+}
+
+.gradient-tile.gradient-forest {
+  background: linear-gradient(135deg, #0c1f16 0%, #1e4d3b 55%, #4f9d69 100%);
+}
+
+.gradient-tile.gradient-violet {
+  background: linear-gradient(135deg, #1b1030 0%, #4b2a80 55%, #8f6bd6 100%);
+}
+
+.gradient-tile.gradient-slate {
+  background: linear-gradient(135deg, #17181c 0%, #3a3d45 55%, #6f7480 100%);
+}

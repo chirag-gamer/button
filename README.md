@@ -1,3 +1,5 @@
+<img src="app/src-tauri/icons/128x128.png" alt="" width="64" height="64">
+
 # button
 
 A free, open-source Windows app that gets your screen ready to record in one click, and puts everything back when you're done.

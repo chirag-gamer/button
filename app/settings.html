@@ -77,12 +77,12 @@
           aria-labelledby="nav-general"
         >
           <h2>General</h2>
-          <div class="field">
-            <input id="start-with-windows" type="checkbox" />
+          <div class="field toggle-field">
+            <input id="start-with-windows" class="switch" type="checkbox" />
             <label for="start-with-windows">Start with Windows</label>
           </div>
-          <div class="field">
-            <input id="check-updates" type="checkbox" />
+          <div class="field toggle-field">
+            <input id="check-updates" class="switch" type="checkbox" />
             <label for="check-updates">Check for updates</label>
           </div>
           <p class="note">The update check works in a later phase.</p>
@@ -105,8 +105,8 @@
           <div id="actions" class="rows"></div>
 
           <h3>Options</h3>
-          <div class="field">
-            <input id="countdown" type="checkbox" />
+          <div class="field toggle-field">
+            <input id="countdown" class="switch" type="checkbox" />
             <label for="countdown">Show a 3·2·1 countdown before applying</label>
           </div>
           <div class="field">
@@ -201,8 +201,8 @@
               step="1"
             />
           </div>
-          <div class="field">
-            <input id="allow-display-off" type="checkbox" />
+          <div class="field toggle-field">
+            <input id="allow-display-off" class="switch" type="checkbox" />
             <label for="allow-display-off">Let the screen turn off</label>
           </div>
 
@@ -243,43 +243,59 @@
           <h2>Backdrop</h2>
           <fieldset>
             <legend>Style</legend>
-            <div class="field">
-              <input
-                id="style-color"
-                type="radio"
-                name="backdrop-style"
-                value="color"
-              />
-              <label for="style-color">Solid colour</label>
-            </div>
-            <div class="field">
-              <input
-                id="style-gradient"
-                type="radio"
-                name="backdrop-style"
-                value="gradient"
-              />
-              <label for="style-gradient">Gradient</label>
-            </div>
-            <div class="field">
-              <input
-                id="style-picture"
-                type="radio"
-                name="backdrop-style"
-                value="picture"
-              />
-              <label for="style-picture">Picture</label>
-            </div>
-            <div class="field">
-              <input
-                id="style-wallpaper"
-                type="radio"
-                name="backdrop-style"
-                value="wallpaper"
-              />
-              <label for="style-wallpaper">Windows wallpaper</label>
+            <div class="rows">
+              <label class="row" for="style-wallpaper">
+                <input
+                  id="style-wallpaper"
+                  type="radio"
+                  name="backdrop-style"
+                  value="wallpaper"
+                />
+                <span class="name">Windows wallpaper</span>
+              </label>
+              <label class="row" for="style-builtin">
+                <input
+                  id="style-builtin"
+                  type="radio"
+                  name="backdrop-style"
+                  value="builtin"
+                />
+                <span class="name">Built-in picture</span>
+              </label>
+              <label class="row" for="style-picture">
+                <input
+                  id="style-picture"
+                  type="radio"
+                  name="backdrop-style"
+                  value="picture"
+                />
+                <span class="name">Picture</span>
+              </label>
+              <label class="row" for="style-gradient">
+                <input
+                  id="style-gradient"
+                  type="radio"
+                  name="backdrop-style"
+                  value="gradient"
+                />
+                <span class="name">Gradient</span>
+              </label>
+              <label class="row" for="style-color">
+                <input
+                  id="style-color"
+                  type="radio"
+                  name="backdrop-style"
+                  value="color"
+                />
+                <span class="name">Solid colour</span>
+              </label>
             </div>
           </fieldset>
+
+          <div id="builtin-block" class="option-block">
+            <h3>Built-in picture</h3>
+            <div id="builtins" class="builtins"></div>
+          </div>
 
           <div id="colour-block" class="option-block">
             <h3>Colour</h3>
@@ -307,6 +323,8 @@
 
           <div class="option-block">
             <h3>Effect</h3>
+            <p class="note">Blur and dim apply to pictures and the wallpaper.</p>
+            <div id="blur-presets" class="presets" role="group" aria-label="Blur presets"></div>
             <div class="field">
               <label for="backdrop-blur">Blur</label>
               <input
