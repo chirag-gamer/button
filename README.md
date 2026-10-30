@@ -1,4 +1,6 @@
-<img src="app/src-tauri/icons/128x128.png" alt="" width="64" height="64">
+<img src="media/launch.gif" alt="button launch video" width="100%">
+
+Watch it with sound: [landscape](https://github.com/chirag-gamer/button/releases/download/v1.0.0/button-launch.mp4) or [vertical](https://github.com/chirag-gamer/button/releases/download/v1.0.0/button-launch-vertical.mp4).
 
 # button
 
